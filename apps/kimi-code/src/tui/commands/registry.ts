@@ -220,9 +220,9 @@ export const BUILTIN_SLASH_COMMANDS = [
   },
   {
     name: 'sessions',
-    aliases: ['resume'],
+    aliases: ['resume', 's'],
     description: 'Browse and resume sessions',
-    priority: 80,
+    priority: 101,
   },
   {
     name: 'tasks',

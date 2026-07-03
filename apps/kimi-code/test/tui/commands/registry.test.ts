@@ -38,6 +38,7 @@ describe('built-in slash command registry', () => {
     expect(findBuiltInSlashCommand('mcp')?.name).toBe('mcp');
     expect(findBuiltInSlashCommand('status')?.name).toBe('status');
     expect(findBuiltInSlashCommand('usage')?.aliases).not.toContain('status');
+    expect(findBuiltInSlashCommand('s')?.name).toBe('sessions');
     expect(findBuiltInSlashCommand('unknown')).toBeUndefined();
   });
 
