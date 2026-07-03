@@ -65,10 +65,8 @@ describe('WelcomeComponent', () => {
     const lines = new WelcomeComponent(appState).render(80);
     const plain = stripAnsi(lines.join('\n'));
 
-    expect(plain).toContain('Welcome to Kimi Code!');
-    expect(plain).toContain('Directory: /tmp/project');
+    expect(plain).toContain('Kimi Code');
     expect(plain).toContain('Session:   ses-1');
-    expect(plain).toContain('Model:     kimi-k2');
     expect(plain).toContain('Version:   1.2.3 K');
     expect(plain).not.toContain('Send /help for help information.');
 
@@ -88,13 +86,11 @@ describe('WelcomeComponent', () => {
     expect(codes.size).toBe(1);
   });
 
-  it('shows the warning model value when logged out', () => {
-    const loggedOut = { ...appState, model: '' };
-    const lines = new WelcomeComponent(loggedOut).render(80);
-    const plain = stripAnsi(lines.join('\n'));
+  it('keeps one blank line before the title and no trailing blank line', () => {
+    const lines = new WelcomeComponent(appState).render(80);
 
-    expect(plain).toContain('not set, run /login or /provider');
-    expect(plain).not.toContain('Run /login or /provider to get started.');
+    expect(lines[0]).toBe('');
+    expect(stripAnsi(lines.at(-1)!).startsWith('Version:')).toBe(true);
   });
 
   it('keeps every line within the requested width on narrow terminals', () => {

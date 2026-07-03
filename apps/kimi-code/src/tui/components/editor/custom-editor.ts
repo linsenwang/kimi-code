@@ -149,7 +149,7 @@ export class CustomEditor extends Editor {
    *  text buffer — it is a separate mode + prompt symbol (see handleInput). */
   public inputMode: 'prompt' | 'bash' = 'prompt';
   public onInputModeChange?: (mode: 'prompt' | 'bash') => void;
-  public connectedAbove = false;
+  public override connectedAbove = true;
   public borderHighlighted = false;
   /**
    * Called when the user triggers "paste image" (Ctrl-V on Unix,
@@ -258,13 +258,18 @@ export class CustomEditor extends Editor {
 
   override render(width: number): string[] {
     const lines = super.render(width);
-    if (lines.length < 3) return lines;
 
-    // Strip the outer box: pi-tui always emits a top and bottom border line
-    // (plain dashes or scroll indicators), and CustomEditor used to add side
-    // borders. Drop the first and last border-like lines; keep content and any
-    // autocomplete lines that follow the bottom border.
-    const contentLines = lines.slice(1);
+    // Strip the outer box: pi-tui emits a top and bottom border line
+    // (plain dashes or scroll indicators) by default, and CustomEditor used
+    // to add side borders. When `connectedAbove` is true the top border is
+    // omitted. Drop any leading/trailing border-like lines; keep content and
+    // any autocomplete lines that follow the bottom border.
+    let start = 0;
+    const firstPlain = stripSgr(lines[0] ?? '');
+    if (firstPlain.length > 0 && firstPlain[0] === '─') {
+      start = 1;
+    }
+    const contentLines = lines.slice(start);
     let bottomBorderIdx = -1;
     for (let i = contentLines.length - 1; i >= 0; i--) {
       const plain = stripSgr(contentLines[i] ?? '');
@@ -310,6 +315,10 @@ export class CustomEditor extends Editor {
         contentLines[firstContentIdx] = withPrompt;
       }
     }
+
+    // Leave one blank row between the editor and the content above it
+    // (welcome panel, transcript output, status messages, etc.).
+    contentLines.unshift('');
     return contentLines;
   }
 

@@ -285,6 +285,10 @@ export class Editor implements Component, Focusable {
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
 
+	// When true, the editor is visually connected to the component above it
+	// and should not render its top border.
+	public connectedAbove: boolean = false;
+
 	// Autocomplete support
 	private autocompleteProvider?: AutocompleteProvider;
 	private autocompleteTriggerCharacters = [...DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS];
@@ -590,17 +594,20 @@ export class Editor implements Component, Focusable {
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
-		// Render top border (with scroll indicator if scrolled down)
-		if (this.scrollOffset > 0) {
-			const indicator = `─── ↑ ${this.scrollOffset} more `;
-			const remaining = width - visibleWidth(indicator);
-			if (remaining >= 0) {
-				result.push(this.borderColor(indicator + "─".repeat(remaining)));
+		// Render top border (with scroll indicator if scrolled down).
+		// Skip it when the editor is visually connected to the component above.
+		if (!this.connectedAbove) {
+			if (this.scrollOffset > 0) {
+				const indicator = `─── ↑ ${this.scrollOffset} more `;
+				const remaining = width - visibleWidth(indicator);
+				if (remaining >= 0) {
+					result.push(this.borderColor(indicator + "─".repeat(remaining)));
+				} else {
+					result.push(this.borderColor(truncateToWidth(indicator, width)));
+				}
 			} else {
-				result.push(this.borderColor(truncateToWidth(indicator, width)));
+				result.push(horizontal.repeat(Math.max(0, width)));
 			}
-		} else {
-			result.push(horizontal.repeat(Math.max(0, width)));
 		}
 
 		// Render each visible layout line

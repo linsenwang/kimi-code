@@ -394,7 +394,7 @@ describe('CustomEditor slash argument hint', () => {
       editor.handleInput(char);
     }
 
-    const contentLine = editor.render(90)[0] ?? '';
+    const contentLine = editor.render(90).find((line) => line.includes('/add-dir')) ?? '';
     const tokenIdx = contentLine.indexOf('/add-dir');
     expect(tokenIdx).toBeGreaterThan(-1);
     // Prompt mode wraps `/add-dir` in a primary-colour ANSI sequence; in bash
