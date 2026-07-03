@@ -47,6 +47,9 @@ export interface EditorKeyboardHost {
 export class EditorKeyboardController {
   private pendingExit: PendingExit | null = null;
   private pendingUndoEsc: { readonly timer: ReturnType<typeof setTimeout> } | null = null;
+  private ctrlCFeedbackCount = 0;
+  private ctrlCFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly CTRL_C_FEEDBACK_WINDOW_MS = 700;
 
   constructor(
     private readonly host: EditorKeyboardHost,
@@ -144,10 +147,12 @@ export class EditorKeyboardController {
       }
 
       // Ctrl+C is intentionally not used to exit the app; only Ctrl+D exits.
-      // If there is nothing to cancel, just clear any editor draft.
+      // Give terminal-style visual feedback (a row of C's) since nothing else
+      // happened.
       if (editor.getText().length > 0) {
         editor.setText('');
       }
+      this.showCtrlCFeedback();
     };
 
     editor.onCtrlD = () => {
@@ -311,9 +316,29 @@ export class EditorKeyboardController {
     this.pendingExit = null;
   }
 
+  private showCtrlCFeedback(): void {
+    if (this.ctrlCFeedbackTimer !== null) {
+      clearTimeout(this.ctrlCFeedbackTimer);
+    }
+    this.ctrlCFeedbackCount += 1;
+    this.host.state.footer.setTransientHint('C'.repeat(this.ctrlCFeedbackCount));
+    this.host.state.ui.requestRender();
+
+    this.ctrlCFeedbackTimer = setTimeout(() => {
+      this.ctrlCFeedbackCount = 0;
+      this.ctrlCFeedbackTimer = null;
+      this.host.state.footer.setTransientHint(null);
+      this.host.state.ui.requestRender();
+    }, EditorKeyboardController.CTRL_C_FEEDBACK_WINDOW_MS);
+  }
+
   dispose(): void {
     this.clearPendingExit();
     this.clearPendingUndoEsc();
+    if (this.ctrlCFeedbackTimer !== null) {
+      clearTimeout(this.ctrlCFeedbackTimer);
+      this.ctrlCFeedbackTimer = null;
+    }
   }
 
   private armPendingUndoEsc(): void {
