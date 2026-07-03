@@ -30,9 +30,12 @@ export const UpgradePreferencesSchema = z.object({
   autoInstall: z.boolean(),
 });
 
+const KeybindingValueSchema = z.union([z.string(), z.array(z.string())]);
+
 export const TuiConfigFileSchema = z.object({
   theme: TuiThemeSchema.optional(),
   disable_paste_burst: z.boolean().optional(),
+  keybindings: z.record(z.string(), KeybindingValueSchema).optional(),
   editor: z
     .object({
       command: z.string().optional(),
@@ -54,6 +57,7 @@ export const TuiConfigFileSchema = z.object({
 export const TuiConfigSchema = z.object({
   theme: TuiThemeSchema,
   disablePasteBurst: z.boolean(),
+  keybindings: z.record(z.string(), KeybindingValueSchema),
   editorCommand: z.string().nullable(),
   notifications: NotificationsConfigSchema,
   upgrade: UpgradePreferencesSchema,
@@ -73,9 +77,16 @@ export const DEFAULT_UPGRADE_PREFERENCES: UpgradePreferences = {
   autoInstall: true,
 };
 
+function getDefaultKeybindings(): Record<string, string | string[]> {
+  return {
+    'tui.input.pasteImage': process.platform === 'win32' ? 'alt+v' : ['ctrl+v', 'super+v'],
+  };
+}
+
 export const DEFAULT_TUI_CONFIG: TuiConfig = TuiConfigSchema.parse({
   theme: 'auto',
   disablePasteBurst: false,
+  keybindings: getDefaultKeybindings(),
   editorCommand: null,
   notifications: DEFAULT_NOTIFICATIONS_CONFIG,
   upgrade: DEFAULT_UPGRADE_PREFERENCES,
@@ -136,6 +147,7 @@ export function normalizeTuiConfig(config: TuiConfigFileShape): TuiConfig {
   return TuiConfigSchema.parse({
     theme: config.theme ?? DEFAULT_TUI_CONFIG.theme,
     disablePasteBurst: config.disable_paste_burst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
+    keybindings: config.keybindings ?? DEFAULT_TUI_CONFIG.keybindings,
     editorCommand: command === undefined || command.length === 0 ? null : command,
     notifications: {
       enabled: config.notifications?.enabled ?? DEFAULT_NOTIFICATIONS_CONFIG.enabled,
@@ -149,14 +161,14 @@ export function normalizeTuiConfig(config: TuiConfigFileShape): TuiConfig {
 }
 
 export function renderTuiConfig(config: TuiConfig): string {
+  const keybindingsSection = renderKeybindingsSection(config.keybindings);
   return `# ~/.kimi-code/tui.toml
 # Client preferences for kimi-code.
 # Agent/runtime settings stay in ~/.kimi-code/config.toml.
 
 theme = "${escapeTomlBasicString(config.theme)}" # "auto" | "dark" | "light" | custom theme name
 disable_paste_burst = ${String(config.disablePasteBurst)} # true disables non-bracketed paste-burst fallback
-
-[editor]
+${keybindingsSection}[editor]
 command = "${escapeTomlBasicString(config.editorCommand ?? '')}" # Empty uses $VISUAL / $EDITOR
 
 [notifications]
@@ -166,6 +178,24 @@ notification_condition = "${config.notifications.condition}" # "unfocused" | "al
 [upgrade]
 auto_install = ${String(config.upgrade.autoInstall)} # true | false
 `;
+}
+
+function renderKeybindingsSection(keybindings: Record<string, string | string[]>): string {
+  const entries = Object.entries(keybindings);
+  if (entries.length === 0) {
+    return '';
+  }
+  let section = '\n[keybindings]\n';
+  for (const [id, value] of entries) {
+    const key = id.includes('.') ? `"${escapeTomlBasicString(id)}"` : id;
+    if (Array.isArray(value)) {
+      const items = value.map((v) => `"${escapeTomlBasicString(v)}"`).join(', ');
+      section += `${key} = [${items}]\n`;
+    } else {
+      section += `${key} = "${escapeTomlBasicString(value)}"\n`;
+    }
+  }
+  return section + '\n';
 }
 
 function escapeTomlBasicString(value: string): string {

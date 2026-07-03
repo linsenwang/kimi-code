@@ -50,6 +50,7 @@ export interface AppState {
   editorCommand: string | null;
   /** Mirrors the TUI config toggle; defaults to false when absent from older fixtures. */
   disablePasteBurst?: boolean;
+  keybindings: Record<string, string | string[]>;
   notifications: NotificationsConfig;
   upgrade: UpgradePreferences;
   availableModels: Record<string, ModelAlias>;

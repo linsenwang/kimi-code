@@ -27,6 +27,7 @@ describe('update preference commands', () => {
         appState: {
           theme: 'auto' as const,
           editorCommand: null,
+          keybindings: {},
           notifications: { enabled: true, condition: 'unfocused' as const },
           upgrade: { autoInstall: true },
         },
@@ -43,6 +44,7 @@ describe('update preference commands', () => {
       theme: 'auto',
       editorCommand: null,
       disablePasteBurst: false,
+      keybindings: {},
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: false },
     });

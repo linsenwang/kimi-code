@@ -146,6 +146,7 @@ export class SessionEventHandler {
   private queuedGoalPromotionPending = false;
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
+  private streamingGeneratedChars = 0;
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -163,6 +164,8 @@ export class SessionEventHandler {
     this.queuedGoalPromotionInFlight = false;
     this.clearQueuedGoalPromotionTimer();
     this.stopAllMcpServerStatusSpinners();
+    this.streamingGeneratedChars = 0;
+    this.host.state.footer?.setStreamingMetrics({ phase: 'idle', generatedChars: 0, startTime: 0 });
   }
 
   clearAgentSwarmProgress(): void {
@@ -299,6 +302,12 @@ export class SessionEventHandler {
     this.clearAgentSwarmProgress();
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.setStep(0);
+    this.streamingGeneratedChars = 0;
+    this.host.state.footer?.setStreamingMetrics({
+      phase: 'waiting',
+      generatedChars: 0,
+      startTime: Date.now(),
+    });
     this.host.patchLivePane({
       mode: 'waiting',
       pendingApproval: null,
@@ -330,6 +339,8 @@ export class SessionEventHandler {
 
   private handleTurnEnd(event: TurnEndedEvent, sendQueued: (item: QueuedMessage) => void): void {
     this.host.streamingUI.flushNow();
+    this.streamingGeneratedChars = 0;
+    this.host.state.footer?.setStreamingMetrics({ phase: 'idle', generatedChars: 0, startTime: 0 });
     if (event.reason === 'cancelled') {
       this.markActiveAgentSwarmsCancelled();
     }
@@ -353,6 +364,12 @@ export class SessionEventHandler {
     this.host.streamingUI.setStep(event.step);
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeLiveTextBuffers('waiting');
+    this.streamingGeneratedChars = 0;
+    this.host.state.footer?.setStreamingMetrics({
+      phase: 'waiting',
+      generatedChars: 0,
+      startTime: Date.now(),
+    });
     this.host.patchLivePane({
       mode: 'waiting',
       pendingApproval: null,
@@ -422,6 +439,8 @@ export class SessionEventHandler {
     this.host.streamingUI.flushNow();
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeLiveTextBuffers('idle');
+    this.streamingGeneratedChars = 0;
+    this.host.state.footer?.setStreamingMetrics({ phase: 'idle', generatedChars: 0, startTime: 0 });
     const reason = event.reason;
     if (reason === 'error') return;
     if (reason === 'aborted' || reason === undefined || reason === '') {
@@ -447,10 +466,21 @@ export class SessionEventHandler {
     // token arrives. Keep the moon up until actual thinking text shows up.
     if (event.delta.length === 0 && !streamingUI.hasThinkingDraft()) return;
     streamingUI.appendThinkingDelta(event.delta);
-    this.host.patchLivePane({ mode: 'idle' });
-    if (state.appState.streamingPhase !== 'thinking') {
+
+    const isFirstThinking = state.appState.streamingPhase !== 'thinking';
+    if (isFirstThinking) {
+      this.streamingGeneratedChars = event.delta.length;
       this.host.setAppState({ streamingPhase: 'thinking', streamingStartTime: Date.now() });
+    } else {
+      this.streamingGeneratedChars += event.delta.length;
     }
+    this.host.state.footer?.setStreamingMetrics({
+      phase: 'thinking',
+      generatedChars: this.streamingGeneratedChars,
+      startTime: state.appState.streamingStartTime,
+    });
+
+    this.host.patchLivePane({ mode: 'idle' });
     streamingUI.scheduleFlush();
   }
 
@@ -466,14 +496,24 @@ export class SessionEventHandler {
     }
     streamingUI.appendAssistantDelta(event.delta);
 
+    const isFirstComposing = state.appState.streamingPhase !== 'composing';
+    if (isFirstComposing) {
+      this.streamingGeneratedChars = event.delta.length;
+      this.host.setAppState({ streamingPhase: 'composing', streamingStartTime: Date.now() });
+    } else {
+      this.streamingGeneratedChars += event.delta.length;
+    }
+    this.host.state.footer?.setStreamingMetrics({
+      phase: 'composing',
+      generatedChars: this.streamingGeneratedChars,
+      startTime: state.appState.streamingStartTime,
+    });
+
     this.host.patchLivePane({
       mode: 'idle',
       pendingApproval: null,
       pendingQuestion: null,
     });
-    if (state.appState.streamingPhase !== 'composing') {
-      this.host.setAppState({ streamingPhase: 'composing', streamingStartTime: Date.now() });
-    }
     streamingUI.scheduleFlush();
   }
 
@@ -529,6 +569,23 @@ export class SessionEventHandler {
     if (event.toolCallId.length === 0) return;
     const { state, streamingUI } = this.host;
     streamingUI.accumulateToolCallDelta(event.toolCallId, event.name, event.argumentsPart);
+
+    const argText = event.argumentsPart ?? '';
+    if (argText.length > 0) {
+      const isFirstComposing = state.appState.streamingPhase !== 'composing';
+      if (isFirstComposing) {
+        this.streamingGeneratedChars = argText.length;
+        this.host.setAppState({ streamingPhase: 'composing', streamingStartTime: Date.now() });
+      } else {
+        this.streamingGeneratedChars += argText.length;
+      }
+      this.host.state.footer?.setStreamingMetrics({
+        phase: 'composing',
+        generatedChars: this.streamingGeneratedChars,
+        startTime: state.appState.streamingStartTime,
+      });
+    }
+
     const preview = streamingUI.getStreamingToolCallPreview(event.toolCallId);
     if (
       preview !== undefined &&
@@ -846,6 +903,8 @@ export class SessionEventHandler {
     this.host.streamingUI.flushNow();
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeLiveTextBuffers('idle');
+    this.streamingGeneratedChars = 0;
+    this.host.state.footer?.setStreamingMetrics({ phase: 'idle', generatedChars: 0, startTime: 0 });
     if (event.code === OAUTH_LOGIN_REQUIRED_CODE) {
       this.host.showError(OAUTH_LOGIN_REQUIRED_STARTUP_NOTICE);
       return;
@@ -972,6 +1031,8 @@ export class SessionEventHandler {
 
   private handleCompactionBegin(event: CompactionStartedEvent): void {
     this.host.streamingUI.finalizeLiveTextBuffers('waiting');
+    this.streamingGeneratedChars = 0;
+    this.host.state.footer?.setStreamingMetrics({ phase: 'waiting', generatedChars: 0, startTime: Date.now() });
     this.host.setAppState({
       isCompacting: true,
       streamingPhase: 'waiting',

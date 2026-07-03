@@ -95,7 +95,7 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     transcriptEntries: [],
     terminalState: createTerminalState(),
     activitySpinner: null,
-    toolOutputExpanded: false,
+    toolOutputExpanded: true,
     sessions: [],
     loadingSessions: false,
     sessionsScope: 'cwd',

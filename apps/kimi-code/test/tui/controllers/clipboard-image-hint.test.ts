@@ -1,4 +1,4 @@
-import type { TUI } from '@moonshot-ai/pi-tui';
+import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, type TUI } from '@moonshot-ai/pi-tui';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -648,6 +648,7 @@ describe('ClipboardImageHintController', () => {
   it('shows Alt+V shortcut on Windows', async () => {
     platformSpy?.mockRestore();
     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { 'tui.input.pasteImage': 'alt+v' }));
 
     const footer = createFakeFooter();
     const ui = createFakeTUI();

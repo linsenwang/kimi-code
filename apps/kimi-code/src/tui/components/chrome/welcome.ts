@@ -80,7 +80,7 @@ export class WelcomeComponent implements Component {
       labelStyle('Directory: ') + this.state.workDir,
       labelStyle('Session:   ') + this.state.sessionId,
       labelStyle('Model:     ') + modelValue,
-      labelStyle('Version:   ') + this.state.version,
+      labelStyle('Version:   ') + this.state.version + ' K',
     ];
 
     if (this.state.mcpServersSummary) {

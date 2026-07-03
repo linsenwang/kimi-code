@@ -129,6 +129,7 @@ function makeStartupInput(): KimiTUIStartupInput {
     tuiConfig: {
       theme: 'dark',
       disablePasteBurst: false,
+      keybindings: {},
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
@@ -2382,6 +2383,7 @@ command = "vim"
     expect(tiny.join('\n')).toContain('answer 8');
 
     requestRender.mockClear();
+    driver.state.toolOutputExpanded = false;
     driver.state.editor.onToggleToolExpand?.();
     expect(driver.state.toolOutputExpanded).toBe(true);
     expect(panel.render(80).map(stripSgr)).toEqual(tiny);

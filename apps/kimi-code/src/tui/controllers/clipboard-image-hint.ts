@@ -1,4 +1,4 @@
-import type { TUI } from '@moonshot-ai/pi-tui';
+import { getKeybindings, type TUI } from '@moonshot-ai/pi-tui';
 
 import { clipboardHasImage } from '#/utils/clipboard/clipboard-has-image';
 
@@ -14,7 +14,21 @@ export interface ClipboardImageHintHost {
 }
 
 function getPasteImageShortcut(): string {
-  return process.platform === 'win32' ? 'Alt+V' : 'Ctrl+V';
+  const keys = getKeybindings().getKeys('tui.input.pasteImage');
+  if (keys.length === 0) {
+    return process.platform === 'win32' ? 'Alt+V' : 'Ctrl+V';
+  }
+  return keys.map(formatKeyForHint).join(' / ');
+}
+
+function formatKeyForHint(key: string): string {
+  const withModifiers = key
+    .replaceAll('super+', '⌘')
+    .replaceAll('ctrl+', 'Ctrl+')
+    .replaceAll('alt+', 'Alt+')
+    .replaceAll('shift+', 'Shift+');
+  // Capitalise the trailing key letter (e.g. "Ctrl+v" -> "Ctrl+V").
+  return withModifiers.replace(/([a-z])$/, (letter) => letter.toUpperCase());
 }
 
 export class ClipboardImageHintController {

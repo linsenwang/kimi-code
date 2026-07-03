@@ -25,6 +25,7 @@ function fakeInitialAppState(): AppState {
     theme: 'dark',
     version: '0.0.0-test',
     editorCommand: null,
+    keybindings: {},
     notifications: { enabled: true, condition: 'unfocused' },
     upgrade: { autoInstall: true },
     availableModels: {},
@@ -77,7 +78,7 @@ describe('createTUIState', () => {
     expect(state.queuedMessages).toHaveLength(0);
 
     // Boolean, counter, and optional-field defaults.
-    expect(state.toolOutputExpanded).toBe(false);
+    expect(state.toolOutputExpanded).toBe(true);
     expect(state.activeDialog).toBeNull();
     expect(state.externalEditorRunning).toBe(false);
     expect(state.loadingSessions).toBe(false);

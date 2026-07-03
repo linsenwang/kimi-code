@@ -4,6 +4,7 @@
 
 import {
   Editor,
+  getKeybindings,
   isKeyRelease,
   matchesKey,
   Key,
@@ -352,14 +353,13 @@ export class CustomEditor extends Editor {
       return;
     }
 
-    // Paste image binding — platform-aware:
-    //   Windows terminals reserve Ctrl-V for their own paste handling
-    //   (e.g. Windows Terminal's Ctrl+V shortcut), so we listen for
-    //   Alt-V there. Everywhere else Ctrl-V pastes. When the host
-    //   reports no image available, we fall through to pi-tui's
-    //   normal paste path so text from the clipboard still works.
-    const pasteKey = process.platform === 'win32' ? 'alt+v' : Key.ctrl('v');
-    if (matchesKey(normalized, pasteKey)) {
+    // Paste image binding — configurable via tui.toml. The default is
+    // platform-aware: Alt+V on Windows (where Ctrl+V is terminal-reserved)
+    // and Ctrl+V (plus Super/Command+V on macOS when the terminal forwards
+    // it) everywhere else. When the host reports no image available, we fall
+    // through to pi-tui's normal paste path so text from the clipboard still
+    // works.
+    if (getKeybindings().matches(normalized, 'tui.input.pasteImage')) {
       if (this.expandPasteMarkerAtCursor()) {
         return;
       }

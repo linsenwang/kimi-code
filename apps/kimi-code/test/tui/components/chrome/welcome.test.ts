@@ -30,6 +30,7 @@ const appState: AppState = {
   swarmMode: false,
   theme: 'dark',
   editorCommand: null,
+  keybindings: {},
   notifications: { enabled: true, condition: 'unfocused' },
   upgrade: { autoInstall: true },
   availableModels: {},

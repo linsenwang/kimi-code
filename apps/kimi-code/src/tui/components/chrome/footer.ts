@@ -200,6 +200,9 @@ export class FooterComponent implements Component {
    */
   private backgroundBashTaskCount = 0;
   private backgroundAgentCount = 0;
+  private streamingGeneratedChars = 0;
+  private streamingStartTime = 0;
+  private streamingPhase: AppState['streamingPhase'] = 'idle';
 
   constructor(state: AppState, onRefresh: () => void = () => {}) {
     this.state = state;
@@ -242,6 +245,21 @@ export class FooterComponent implements Component {
   setBackgroundCounts(counts: { bashTasks: number; agentTasks: number }): void {
     this.backgroundBashTaskCount = Math.max(0, counts.bashTasks);
     this.backgroundAgentCount = Math.max(0, counts.agentTasks);
+  }
+
+  /**
+   * Live generation-speed metrics. Updated by the session event handler as
+   * text deltas arrive; the footer renders a `ch/s` badge while the model is
+   * actively generating.
+   */
+  setStreamingMetrics(metrics: {
+    phase: AppState['streamingPhase'];
+    generatedChars: number;
+    startTime: number;
+  }): void {
+    this.streamingPhase = metrics.phase;
+    this.streamingGeneratedChars = metrics.generatedChars;
+    this.streamingStartTime = metrics.startTime;
   }
 
   invalidate(): void {}
@@ -332,29 +350,34 @@ export class FooterComponent implements Component {
       line1 = truncateToWidth(leftLine, width, '…');
     }
 
-    // ── Line 2: transient hint (bottom-left) + context (right) ──
+    // ── Line 2: transient hint (bottom-left) + context / gen speed (right) ──
     const contextText = formatContextStatus(
       state.contextUsage,
       state.contextTokens,
       state.maxContextTokens,
     );
-    const contextWidth = visibleWidth(contextText);
+    const speedText = this.streamingSpeedText();
+    let rightBlock = chalk.hex(colors.text)(contextText);
+    if (speedText) {
+      rightBlock += chalk.hex(colors.textMuted)(' · ') + chalk.hex(colors.text)(speedText);
+    }
+    const rightWidth = visibleWidth(rightBlock);
     let line2: string;
     if (this.transientHint) {
-      const maxHintWidth = Math.max(0, width - contextWidth - 1);
+      const maxHintWidth = Math.max(0, width - rightWidth - 1);
       const shownHint =
         visibleWidth(this.transientHint) <= maxHintWidth
           ? this.transientHint
           : truncateToWidth(this.transientHint, maxHintWidth, '…');
       const hintWidth = visibleWidth(shownHint);
-      const pad = Math.max(0, width - hintWidth - contextWidth);
+      const pad = Math.max(0, width - hintWidth - rightWidth);
       line2 =
         chalk.hex(colors.warning).bold(shownHint) +
         ' '.repeat(pad) +
-        chalk.hex(colors.text)(contextText);
+        rightBlock;
     } else {
-      const leftPad = Math.max(0, width - contextWidth);
-      line2 = ' '.repeat(leftPad) + chalk.hex(colors.text)(contextText);
+      const leftPad = Math.max(0, width - rightWidth);
+      line2 = ' '.repeat(leftPad) + rightBlock;
     }
 
     return [truncateToWidth(line1, width), truncateToWidth(line2, width)];
@@ -388,6 +411,18 @@ export class FooterComponent implements Component {
       clearInterval(this.goalTimer);
       this.goalTimer = null;
     }
+  }
+
+  private streamingSpeedText(): string | null {
+    if (this.streamingPhase !== 'composing' && this.streamingPhase !== 'thinking') {
+      return null;
+    }
+    if (this.streamingGeneratedChars <= 0) return null;
+    const elapsedMs = Date.now() - this.streamingStartTime;
+    if (elapsedMs <= 0) return null;
+    const chPerSec = Math.round((this.streamingGeneratedChars * 1000) / elapsedMs);
+    if (chPerSec <= 0) return null;
+    return `${chPerSec} ch/s`;
   }
 
   private goalWallClockMs(goal: AppState['goal']): number | undefined {

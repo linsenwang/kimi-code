@@ -6,7 +6,11 @@ import {
   type Component,
   type Focusable,
   getCapabilities,
+  type KeybindingsConfig,
+  KeybindingsManager,
+  setKeybindings,
   Spacer,
+  TUI_KEYBINDINGS,
 } from '@moonshot-ai/pi-tui';
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
 import type {
@@ -218,6 +222,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     version: input.version,
     editorCommand: input.tuiConfig.editorCommand,
     disablePasteBurst: input.tuiConfig.disablePasteBurst,
+    keybindings: input.tuiConfig.keybindings,
     notifications: input.tuiConfig.notifications,
     upgrade: input.tuiConfig.upgrade,
     availableModels: {},
@@ -330,6 +335,9 @@ export class KimiTUI {
     this.migrationPlan = startupInput.migrationPlan ?? null;
     this.migrateOnly = startupInput.migrateOnly ?? false;
     this.startupNotice = startupInput.startupNotice;
+    setKeybindings(
+      new KeybindingsManager(TUI_KEYBINDINGS, startupInput.tuiConfig.keybindings as KeybindingsConfig),
+    );
     this.state = createTUIState(tuiOptions);
     this.uninstallRainbowDance = installRainbowDance(() => {
       this.state.ui.requestRender();

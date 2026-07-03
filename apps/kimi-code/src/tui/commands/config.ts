@@ -40,6 +40,7 @@ function currentTuiConfig(host: SlashCommandHost): TuiConfig {
     theme: host.state.appState.theme,
     editorCommand: host.state.appState.editorCommand,
     disablePasteBurst: host.state.appState.disablePasteBurst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
+    keybindings: host.state.appState.keybindings ?? DEFAULT_TUI_CONFIG.keybindings,
     notifications: host.state.appState.notifications,
     upgrade: host.state.appState.upgrade,
   };
@@ -642,7 +643,7 @@ type UpdatePreferenceHost = {
   readonly state: {
     readonly appState: Pick<
       SlashCommandHost['state']['appState'],
-      'theme' | 'editorCommand' | 'notifications' | 'upgrade'
+      'theme' | 'editorCommand' | 'keybindings' | 'notifications' | 'upgrade'
     >;
   };
   setAppState(patch: Pick<SlashCommandHost['state']['appState'], 'upgrade'>): void;

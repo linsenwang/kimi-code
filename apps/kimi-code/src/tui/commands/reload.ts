@@ -1,4 +1,10 @@
 import type { KimiConfig } from '@moonshot-ai/kimi-code-sdk';
+import {
+  type KeybindingsConfig,
+  KeybindingsManager,
+  setKeybindings,
+  TUI_KEYBINDINGS,
+} from '@moonshot-ai/pi-tui';
 
 import { currentTheme, lightColors } from '#/tui/theme';
 import { loadTuiConfig, type TuiConfig } from '../config';
@@ -43,9 +49,11 @@ export async function applyReloadedTuiConfig(
     : undefined;
   await host.applyTheme(config.theme, resolved);
   host.refreshTerminalThemeTracking();
+  setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, config.keybindings as KeybindingsConfig));
   host.setAppState({
     editorCommand: config.editorCommand,
     disablePasteBurst: config.disablePasteBurst,
+    keybindings: config.keybindings,
     notifications: config.notifications,
     upgrade: config.upgrade,
   });
