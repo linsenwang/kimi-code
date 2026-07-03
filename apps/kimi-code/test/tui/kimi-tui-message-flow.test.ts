@@ -2155,16 +2155,16 @@ command = "vim"
 
     const transcript = stripSgr(renderTranscript(driver));
     const panel = stripSgr(renderBtwPanel(driver));
-    const editorTopBorder = stripSgr(driver.state.editor.render(80)[0] ?? '');
+    const editorFirstLine = stripSgr(driver.state.editor.render(80)[0] ?? '');
     expect(panel).toContain('BTW ─ Esc close');
     expect(panel).not.toContain('ctrl+o expand');
-    expect(editorTopBorder.startsWith('├')).toBe(true);
-    expect(editorTopBorder.endsWith('┤')).toBe(true);
+    expect(editorFirstLine).not.toContain('├');
+    expect(editorFirstLine).not.toContain('┤');
 
     driver.state.editor.handleInput('/');
-    const highlightedEditorTopBorder = stripSgr(driver.state.editor.render(80)[0] ?? '');
-    expect(highlightedEditorTopBorder.startsWith('╭')).toBe(true);
-    expect(highlightedEditorTopBorder.endsWith('╮')).toBe(true);
+    const highlightedEditorFirstLine = stripSgr(driver.state.editor.render(80)[0] ?? '');
+    expect(highlightedEditorFirstLine).not.toContain('╭');
+    expect(highlightedEditorFirstLine).not.toContain('╮');
     expect(panel).not.toContain('BTW done');
     expect(panel).not.toContain('BTW running');
     expect(panel).not.toContain('BTW failed');
@@ -2405,9 +2405,9 @@ command = "vim"
     expect(session.cancel).toHaveBeenCalledOnce();
     expect(driver.state.btwPanelContainer.children).toHaveLength(0);
     expect(requestRender.mock.calls.at(-1)).toEqual([true]);
-    const editorTopBorder = stripSgr(driver.state.editor.render(80)[0] ?? '');
-    expect(editorTopBorder.startsWith('╭')).toBe(true);
-    expect(editorTopBorder.endsWith('╮')).toBe(true);
+    const editorFirstLine = stripSgr(driver.state.editor.render(80)[0] ?? '');
+    expect(editorFirstLine).not.toContain('╭');
+    expect(editorFirstLine).not.toContain('╮');
     expect(driver.state.editor.focused).toBe(true);
   });
 

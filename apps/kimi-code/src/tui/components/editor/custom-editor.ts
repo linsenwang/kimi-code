@@ -170,13 +170,11 @@ export class CustomEditor extends Editor {
   }
 
   constructor(tui: TUI, options: CustomEditorOptions = {}) {
-    // paddingX: 4 reserves column 0 for the left vertical border (│),
-    // column 1 as a single space between border and prompt, column 2 for
-    // the `>` prompt token, and column 3 as the space between prompt and
-    // content. The right side mirrors with 3 padding columns and the right
-    // border at the last column.
+    // paddingX: 2 reserves column 0 for the `>` prompt token and column 1
+    // as the space between prompt and content. The right side mirrors with
+    // a single padding column.
     const theme = createEditorTheme();
-    super(tui, theme, { paddingX: 4, disablePasteBurst: options.disablePasteBurst });
+    super(tui, theme, { paddingX: 2, disablePasteBurst: options.disablePasteBurst });
 
     // pi-tui keeps `createAutocompleteList` private; shadow it with an
     // instance property so slash command menus render descriptions wrapped
@@ -261,28 +259,47 @@ export class CustomEditor extends Editor {
   override render(width: number): string[] {
     const lines = super.render(width);
     if (lines.length < 3) return lines;
-    const firstContentIdx = 1;
+
+    // Strip the outer box: pi-tui always emits a top and bottom border line
+    // (plain dashes or scroll indicators), and CustomEditor used to add side
+    // borders. Drop the first and last border-like lines; keep content and any
+    // autocomplete lines that follow the bottom border.
+    const contentLines = lines.slice(1);
+    let bottomBorderIdx = -1;
+    for (let i = contentLines.length - 1; i >= 0; i--) {
+      const plain = stripSgr(contentLines[i] ?? '');
+      if (plain.length > 0 && plain[0] === '─') {
+        bottomBorderIdx = i;
+        break;
+      }
+    }
+    if (bottomBorderIdx >= 0) {
+      contentLines.splice(bottomBorderIdx, 1);
+    }
+    if (contentLines.length === 0) return contentLines;
+
+    const firstContentIdx = 0;
     const isBash = this.inputMode === 'bash';
     const text = this.getText().trimStart();
     if (text.startsWith('/') && !isBash) {
       // Paint only the FIRST editor content line; multi-line slash commands
       // are not a thing in practice.
-      const original = lines[firstContentIdx];
+      const original = contentLines[firstContentIdx];
       if (original !== undefined) {
         const highlighted = highlightFirstSlashToken(original, 'primary');
         if (highlighted !== undefined) {
-          lines[firstContentIdx] = highlighted;
+          contentLines[firstContentIdx] = highlighted;
         }
       }
     }
     const hint = this.computeArgumentHint();
     if (hint !== undefined) {
-      const line = lines[firstContentIdx];
+      const line = contentLines[firstContentIdx];
       if (line !== undefined) {
-        lines[firstContentIdx] = injectArgumentHint(line, hint, this.getText().length, width);
+        contentLines[firstContentIdx] = injectArgumentHint(line, hint, this.getText().length, width);
       }
     }
-    const firstContent = lines[firstContentIdx];
+    const firstContent = contentLines[firstContentIdx];
     if (firstContent !== undefined) {
       const withPrompt = injectPromptSymbol(
         firstContent,
@@ -290,17 +307,10 @@ export class CustomEditor extends Editor {
         isBash ? (s) => this.borderColor(s) : undefined,
       );
       if (withPrompt !== undefined) {
-        lines[firstContentIdx] = withPrompt;
+        contentLines[firstContentIdx] = withPrompt;
       }
     }
-    // `this.borderColor` is pi-tui's per-render paint function. The host may
-    // overwrite it (e.g. plan-mode / slash-context highlight via
-    // `editor.borderColor = chalk.hex(primary)`), so we route corners and
-    // side bars through the same hook to stay in sync.
-    return wrapWithSideBorders(lines, (s) => this.borderColor(s), {
-      connectedAbove: this.connectedAbove && !this.borderHighlighted,
-      label: isBash ? ` ${currentTheme.boldFg('shellMode', '! shell mode')} ` : undefined,
-    });
+    return contentLines;
   }
 
   private computeArgumentHint(): string | undefined {
@@ -635,7 +645,7 @@ function highlightVisibleRanges(
 
 // Mirrors the editor's paddingX (see constructor). The hint is spliced into
 // the first content line, which starts with this many spaces of left padding.
-const EDITOR_LEFT_PADDING = 4;
+const EDITOR_LEFT_PADDING = 2;
 // pi-tui renders the end-of-input cursor as an inverse-video space.
 const CURSOR_BLOCK = '\u001B[7m \u001B[0m';
 
@@ -682,25 +692,24 @@ function truncateHint(hint: string, maxLen: number): string {
 
 /**
  * Overlay a terminal-style `> ` prompt symbol on the first content line.
- * Column 0 is reserved for the left vertical border (overlaid later by
- * wrapWithSideBorders); column 1 is a single-space gap, so the `>` token
- * lives at column 2 with column 3 separating it from content.
- * Relies on the editor being configured with `paddingX >= 4` so the line
- * starts with at least four literal spaces. Emits no SGR so the terminal's
- * default foreground colour renders the symbol. Returns `undefined` if the
- * line is too short or doesn't begin with the expected padding.
+ * The prompt symbol replaces the left padding, so the content starts
+ * immediately after the symbol and its trailing space. Relies on the editor
+ * being configured with `paddingX >= 2` so the line starts with at least two
+ * literal spaces. Emits no SGR so the terminal's default foreground colour
+ * renders the symbol. Returns `undefined` if the line is too short or doesn't
+ * begin with the expected padding.
  */
 export function injectPromptSymbol(
   line: string,
   symbol = '>',
   paint?: (s: string) => string,
 ): string | undefined {
-  if (line.length < 4) return undefined;
-  for (let i = 0; i < 4; i++) {
+  if (line.length < 2) return undefined;
+  for (let i = 0; i < 2; i++) {
     if (line[i] !== ' ') return undefined;
   }
   const rendered = paint ? paint(symbol) : symbol;
-  return '  ' + rendered + ' ' + line.slice(4);
+  return rendered + ' ' + line.slice(2);
 }
 
 /**
