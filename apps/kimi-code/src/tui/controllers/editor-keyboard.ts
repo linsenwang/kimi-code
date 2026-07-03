@@ -6,7 +6,6 @@ import { parseImageMeta } from '#/utils/image/image-mime';
 import { editInExternalEditor, resolveEditorCommand } from '#/utils/process/external-editor';
 
 import {
-  CTRL_C_HINT,
   CTRL_D_HINT,
   DOUBLE_ESC_WINDOW_MS,
   EXIT_CONFIRM_WINDOW_MS,
@@ -144,16 +143,11 @@ export class EditorKeyboardController {
         return;
       }
 
-      if (this.pendingExit?.kind === 'ctrl-c') {
-        this.clearPendingExit();
-        void host.stop();
-        return;
-      }
-
+      // Ctrl+C is intentionally not used to exit the app; only Ctrl+D exits.
+      // If there is nothing to cancel, just clear any editor draft.
       if (editor.getText().length > 0) {
         editor.setText('');
       }
-      this.armPendingExit('ctrl-c', CTRL_C_HINT);
     };
 
     editor.onCtrlD = () => {
@@ -222,8 +216,8 @@ export class EditorKeyboardController {
 
     editor.onToggleTodoExpand = (): boolean => {
       if (!host.state.todoPanel.hasOverflow()) return false;
-      // Disarm a pending double-press exit confirmation so expanding the
-      // todo list in between two Ctrl-C presses does not accidentally exit.
+      // Disarm a pending double-press exit confirmation so intermediate
+      // actions do not accidentally trigger a Ctrl+D exit.
       this.clearPendingExit();
       host.track('shortcut_todo_expand');
       host.toggleTodoPanelExpansion();
