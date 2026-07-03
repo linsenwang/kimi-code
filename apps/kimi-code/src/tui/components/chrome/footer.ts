@@ -350,35 +350,33 @@ export class FooterComponent implements Component {
       line1 = truncateToWidth(leftLine, width, '…');
     }
 
-    // ── Line 2: transient hint (bottom-left) + context / gen speed (right) ──
+    // ── Line 2: gen speed / transient hint (bottom-left) + context (right) ──
     const contextText = formatContextStatus(
       state.contextUsage,
       state.contextTokens,
       state.maxContextTokens,
     );
-    const speedText = this.streamingSpeedText();
-    let rightBlock = chalk.hex(colors.text)(contextText);
-    if (speedText) {
-      rightBlock += chalk.hex(colors.textMuted)(' · ') + chalk.hex(colors.text)(speedText);
-    }
+    const rightBlock = chalk.hex(colors.text)(contextText);
     const rightWidth = visibleWidth(rightBlock);
-    let line2: string;
+
+    const speedText = this.streamingSpeedText();
+    let leftRaw = speedText ?? '';
     if (this.transientHint) {
-      const maxHintWidth = Math.max(0, width - rightWidth - 1);
-      const shownHint =
-        visibleWidth(this.transientHint) <= maxHintWidth
-          ? this.transientHint
-          : truncateToWidth(this.transientHint, maxHintWidth, '…');
-      const hintWidth = visibleWidth(shownHint);
-      const pad = Math.max(0, width - hintWidth - rightWidth);
-      line2 =
-        chalk.hex(colors.warning).bold(shownHint) +
-        ' '.repeat(pad) +
-        rightBlock;
-    } else {
-      const leftPad = Math.max(0, width - rightWidth);
-      line2 = ' '.repeat(leftPad) + rightBlock;
+      leftRaw = this.transientHint;
     }
+    const maxLeftWidth = Math.max(0, width - rightWidth - 1);
+    const shownLeft =
+      visibleWidth(leftRaw) <= maxLeftWidth
+        ? leftRaw
+        : truncateToWidth(leftRaw, maxLeftWidth, '…');
+    const leftBlock = this.transientHint
+      ? chalk.hex(colors.warning).bold(shownLeft)
+      : speedText
+        ? chalk.hex(colors.primary).bold(shownLeft)
+        : '';
+    const left2Width = visibleWidth(leftBlock);
+    const pad = Math.max(0, width - left2Width - rightWidth);
+    const line2 = leftBlock + ' '.repeat(pad) + rightBlock;
 
     return [truncateToWidth(line1, width), truncateToWidth(line2, width)];
   }
