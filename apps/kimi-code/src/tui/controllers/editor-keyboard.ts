@@ -50,6 +50,9 @@ export class EditorKeyboardController {
   private ctrlCFeedbackCount = 0;
   private ctrlCFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly CTRL_C_FEEDBACK_WINDOW_MS = 700;
+  private enterFeedbackCount = 0;
+  private enterFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly ENTER_FEEDBACK_WINDOW_MS = 700;
 
   constructor(
     private readonly host: EditorKeyboardHost,
@@ -62,6 +65,9 @@ export class EditorKeyboardController {
 
     editor.onSubmit = (text: string) => {
       host.handleUserInput(text);
+      if (text.trim().length === 0) {
+        this.showEnterFeedback();
+      }
     };
 
     editor.onChange = (text: string) => {
@@ -332,12 +338,32 @@ export class EditorKeyboardController {
     }, EditorKeyboardController.CTRL_C_FEEDBACK_WINDOW_MS);
   }
 
+  private showEnterFeedback(): void {
+    if (this.enterFeedbackTimer !== null) {
+      clearTimeout(this.enterFeedbackTimer);
+    }
+    this.enterFeedbackCount += 1;
+    this.host.state.footer.setTransientHint('E'.repeat(this.enterFeedbackCount));
+    this.host.state.ui.requestRender();
+
+    this.enterFeedbackTimer = setTimeout(() => {
+      this.enterFeedbackCount = 0;
+      this.enterFeedbackTimer = null;
+      this.host.state.footer.setTransientHint(null);
+      this.host.state.ui.requestRender();
+    }, EditorKeyboardController.ENTER_FEEDBACK_WINDOW_MS);
+  }
+
   dispose(): void {
     this.clearPendingExit();
     this.clearPendingUndoEsc();
     if (this.ctrlCFeedbackTimer !== null) {
       clearTimeout(this.ctrlCFeedbackTimer);
       this.ctrlCFeedbackTimer = null;
+    }
+    if (this.enterFeedbackTimer !== null) {
+      clearTimeout(this.enterFeedbackTimer);
+      this.enterFeedbackTimer = null;
     }
   }
 

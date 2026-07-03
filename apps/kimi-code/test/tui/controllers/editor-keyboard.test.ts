@@ -35,6 +35,7 @@ function createHarness(options: { streamingPhase?: string; isCompacting?: boolea
       ui: { requestRender: vi.fn() },
     },
     session,
+    handleUserInput: vi.fn(),
     btwPanelController: { closeOrCancel: vi.fn(() => false) },
     openUndoSelector,
     cancelRunningShellCommand,
@@ -59,6 +60,12 @@ function pressNonEscape(editor: Harness['editor']): void {
   const handler = editor['onNonEscapeInput'];
   if (handler === undefined) throw new Error('onNonEscapeInput handler not installed');
   (handler as () => void)();
+}
+
+function pressEnter(editor: Harness['editor'], text = ''): void {
+  const handler = editor['onSubmit'];
+  if (handler === undefined) throw new Error('onSubmit handler not installed');
+  (handler as (text: string) => void)(text);
 }
 
 describe('EditorKeyboardController double-Esc undo', () => {
@@ -197,5 +204,52 @@ describe('EditorKeyboardController shell history recall', () => {
     restore('prompt');
 
     expect(editor['setInputMode'] as unknown as Mock).toHaveBeenCalledWith('prompt');
+  });
+});
+
+describe('EditorKeyboardController Enter feedback', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('shows terminal-style E feedback in the footer for an empty submit', () => {
+    const { editor, host } = createHarness();
+
+    pressEnter(editor, '');
+
+    expect(host.state.footer.setTransientHint).toHaveBeenCalledWith('E');
+    expect(host.state.ui.requestRender).toHaveBeenCalled();
+  });
+
+  it('does not show E feedback when the submit has text', () => {
+    const { editor, host } = createHarness();
+
+    pressEnter(editor, 'hello');
+
+    expect(host.state.footer.setTransientHint).not.toHaveBeenCalled();
+  });
+
+  it('accumulates E count for repeated empty submits within the window', () => {
+    const { editor, host } = createHarness();
+
+    pressEnter(editor, '');
+    pressEnter(editor, '');
+    pressEnter(editor, '');
+
+    expect(host.state.footer.setTransientHint).toHaveBeenLastCalledWith('EEE');
+  });
+
+  it('resets the E feedback after the window expires', () => {
+    const { editor, host } = createHarness();
+
+    pressEnter(editor, '');
+    vi.advanceTimersByTime(701);
+    pressEnter(editor, '');
+
+    expect(host.state.footer.setTransientHint).toHaveBeenLastCalledWith('E');
   });
 });
