@@ -203,6 +203,8 @@ export class FooterComponent implements Component {
   private streamingGeneratedChars = 0;
   private streamingStartTime = 0;
   private streamingPhase: AppState['streamingPhase'] = 'idle';
+  private speedSamples: Array<{ ts: number; chars: number }> = [];
+  private static readonly SPEED_WINDOW_MS = 3000;
 
   constructor(state: AppState, onRefresh: () => void = () => {}) {
     this.state = state;
@@ -256,10 +258,20 @@ export class FooterComponent implements Component {
     phase: AppState['streamingPhase'];
     generatedChars: number;
     startTime: number;
+    deltaChars?: number;
   }): void {
+    if (metrics.phase !== this.streamingPhase) {
+      this.speedSamples = [];
+    }
     this.streamingPhase = metrics.phase;
     this.streamingGeneratedChars = metrics.generatedChars;
     this.streamingStartTime = metrics.startTime;
+    if (metrics.deltaChars !== undefined && metrics.deltaChars > 0) {
+      this.speedSamples.push({ ts: Date.now(), chars: metrics.deltaChars });
+    }
+    if (metrics.generatedChars === 0) {
+      this.speedSamples = [];
+    }
   }
 
   invalidate(): void {}
@@ -415,10 +427,13 @@ export class FooterComponent implements Component {
     if (this.streamingPhase !== 'composing' && this.streamingPhase !== 'thinking') {
       return null;
     }
-    if (this.streamingGeneratedChars <= 0) return null;
-    const elapsedMs = Date.now() - this.streamingStartTime;
-    if (elapsedMs <= 0) return null;
-    const chPerSec = Math.round((this.streamingGeneratedChars * 1000) / elapsedMs);
+    const now = Date.now();
+    const windowStart = now - FooterComponent.SPEED_WINDOW_MS;
+    this.speedSamples = this.speedSamples.filter((s) => s.ts > windowStart && s.ts <= now);
+    if (this.speedSamples.length === 0) return null;
+    const totalChars = this.speedSamples.reduce((sum, s) => sum + s.chars, 0);
+    const durationMs = Math.max(1000, now - this.speedSamples[0]!.ts);
+    const chPerSec = Math.round((totalChars * 1000) / durationMs);
     if (chPerSec <= 0) return null;
     return `${chPerSec} ch/s`;
   }

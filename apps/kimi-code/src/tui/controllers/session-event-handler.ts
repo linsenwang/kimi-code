@@ -478,6 +478,7 @@ export class SessionEventHandler {
       phase: 'thinking',
       generatedChars: this.streamingGeneratedChars,
       startTime: state.appState.streamingStartTime,
+      deltaChars: event.delta.length,
     });
 
     this.host.patchLivePane({ mode: 'idle' });
@@ -507,6 +508,7 @@ export class SessionEventHandler {
       phase: 'composing',
       generatedChars: this.streamingGeneratedChars,
       startTime: state.appState.streamingStartTime,
+      deltaChars: event.delta.length,
     });
 
     this.host.patchLivePane({
@@ -569,22 +571,6 @@ export class SessionEventHandler {
     if (event.toolCallId.length === 0) return;
     const { state, streamingUI } = this.host;
     streamingUI.accumulateToolCallDelta(event.toolCallId, event.name, event.argumentsPart);
-
-    const argText = event.argumentsPart ?? '';
-    if (argText.length > 0) {
-      const isFirstComposing = state.appState.streamingPhase !== 'composing';
-      if (isFirstComposing) {
-        this.streamingGeneratedChars = argText.length;
-        this.host.setAppState({ streamingPhase: 'composing', streamingStartTime: Date.now() });
-      } else {
-        this.streamingGeneratedChars += argText.length;
-      }
-      this.host.state.footer?.setStreamingMetrics({
-        phase: 'composing',
-        generatedChars: this.streamingGeneratedChars,
-        startTime: state.appState.streamingStartTime,
-      });
-    }
 
     const preview = streamingUI.getStreamingToolCallPreview(event.toolCallId);
     if (
