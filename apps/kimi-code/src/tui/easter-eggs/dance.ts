@@ -10,7 +10,6 @@
  */
 
 import chalk from 'chalk';
-import { truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
 
 import type { SlashCommandHost } from '../commands/dispatch';
 import type { ParsedSlashInput } from '../commands/types';
@@ -109,35 +108,14 @@ export function isRainbowDancing(): boolean {
   return currentDanceView?.colored === true;
 }
 
-export function renderDanceWelcomeHeader(
-  logo: readonly [string, string],
-  textWidth: number,
-  rightRow1: string,
-): string[] {
-  const phase = currentDanceView?.phase ?? 0;
-  const palette = getDanceRainbowPalette();
-  const logoWidth = Math.max(...logo.map((row) => visibleWidth(row)));
-  const gap = '  ';
-  const rightRow0 = truncateToWidth(
-    rainbowText('Welcome to Kimi Code!', palette, phase + 2, true),
-    textWidth,
-    '…',
-  );
-
-  return [
-    rainbowText(logo[0].padEnd(logoWidth), palette, phase) + gap + rightRow0,
-    rainbowText(logo[1].padEnd(logoWidth), palette, phase + 3) + gap + rightRow1,
-  ];
-}
-
 export function renderDanceFooterModel(modelLabel: string): string {
   return rainbowText(modelLabel, getDanceRainbowPalette(), currentDanceView?.phase ?? 0);
 }
 
 /**
  * Drives the rainbow: a single timer advances a shared `phase` and asks the UI
- * to repaint. Lives independently of any component, so the welcome banner
- * scrolling away or being rebuilt never disturbs the animation. Three states:
+ * to repaint. Lives independently of any component, so components
+ * scrolling away or being rebuilt never disturb the animation. Three states:
  * off (default), flowing, and a frozen static rainbow.
  */
 export class RainbowDance implements RainbowDanceController {

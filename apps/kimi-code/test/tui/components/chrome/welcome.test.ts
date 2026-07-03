@@ -3,8 +3,7 @@ import chalk from 'chalk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
-import { setRainbowDance, type RainbowDanceController } from '#/tui/easter-eggs/dance';
-import { darkColors } from '#/tui/theme/colors';
+import { setRainbowDance } from '#/tui/easter-eggs/dance';
 import type { AppState } from '#/tui/types';
 
 const TRUECOLOR_PATTERN = /\u001B\[38;2;(\d+);(\d+);(\d+)m/g;
@@ -46,20 +45,8 @@ function truecolorCodes(text: string): Set<string> {
   return codes;
 }
 
-/** The two header rows (logo + title) of the rendered welcome box. */
-function headerOf(lines: string[]): string {
-  return [lines[3], lines[4]].join('\n');
-}
-
-function setDanceView(colored: boolean, phase: number): void {
-  const dance: RainbowDanceController = {
-    colored,
-    phase,
-    start: () => {},
-    stop: () => {},
-    dispose: () => {},
-  };
-  setRainbowDance(dance);
+function stripAnsi(text: string): string {
+  return text.replaceAll(/\u001B\[[0-9;]*m/g, '');
 }
 
 describe('WelcomeComponent', () => {
@@ -74,26 +61,40 @@ describe('WelcomeComponent', () => {
     setRainbowDance(undefined);
   });
 
-  it('renders the banner in a single brand color by default', () => {
-    const codes = truecolorCodes(headerOf(new WelcomeComponent(appState).render(80)));
+  it('renders the welcome text and info lines without a box or logo', () => {
+    const lines = new WelcomeComponent(appState).render(80);
+    const plain = stripAnsi(lines.join('\n'));
 
-    // No rainbow by default — just the brand primary (plus the dim tagline).
-    expect(codes.size).toBeLessThanOrEqual(2);
+    expect(plain).toContain('Welcome to Kimi Code!');
+    expect(plain).toContain('Directory: /tmp/project');
+    expect(plain).toContain('Session:   ses-1');
+    expect(plain).toContain('Model:     kimi-k2');
+    expect(plain).toContain('Version:   1.2.3 K');
+    expect(plain).not.toContain('Send /help for help information.');
+
+    expect(plain).not.toContain('╭');
+    expect(plain).not.toContain('╮');
+    expect(plain).not.toContain('│');
+    expect(plain).not.toContain('╰');
+    expect(plain).not.toContain('╯');
+    expect(plain).not.toContain('▐█▛█▛█▌');
+    expect(plain).not.toContain('▐█████▌');
   });
 
-  it('paints the banner in rainbow while colored', () => {
-    setDanceView(true, 0);
-    const codes = truecolorCodes(headerOf(new WelcomeComponent(appState).render(80)));
+  it('uses the brand primary color for the title', () => {
+    const lines = new WelcomeComponent(appState).render(80);
+    const codes = truecolorCodes(lines[1]!);
 
-    expect(codes.size).toBeGreaterThanOrEqual(5);
+    expect(codes.size).toBe(1);
   });
 
-  it('renders exactly the default banner when not colored', () => {
-    const base = headerOf(new WelcomeComponent(appState).render(80));
-    setDanceView(false, 5);
-    const off = headerOf(new WelcomeComponent(appState).render(80));
+  it('shows the warning model value when logged out', () => {
+    const loggedOut = { ...appState, model: '' };
+    const lines = new WelcomeComponent(loggedOut).render(80);
+    const plain = stripAnsi(lines.join('\n'));
 
-    expect(off).toBe(base);
+    expect(plain).toContain('not set, run /login or /provider');
+    expect(plain).not.toContain('Run /login or /provider to get started.');
   });
 
   it('keeps every line within the requested width on narrow terminals', () => {
