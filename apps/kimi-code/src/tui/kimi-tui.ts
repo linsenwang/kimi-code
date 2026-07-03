@@ -900,6 +900,7 @@ export class KimiTUI {
     ui.addChild(this.state.queueContainer);
     ui.addChild(this.state.btwPanelContainer);
     ui.addChild(this.state.editorContainer);
+    ui.addChild(new Spacer(1));
     // Footer is mounted later (mountFooter), not here.
   }
 
