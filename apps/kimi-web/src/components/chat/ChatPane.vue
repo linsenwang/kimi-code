@@ -8,13 +8,14 @@ import ToolGroup from './ToolGroup.vue';
 import Markdown from './Markdown.vue';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ActivityNotice from './ActivityNotice.vue';
+import CronNotice from './CronNotice.vue';
+import MessageTime from './MessageTime.vue';
 import AuthMedia from './AuthMedia.vue';
 import MoonSpinner from '../ui/MoonSpinner.vue';
 import Spinner from '../ui/Spinner.vue';
 import Icon from '../ui/Icon.vue';
 import Tooltip from '../ui/Tooltip.vue';
 import { useConfirmDialog } from '../../composables/useConfirmDialog';
-import { formatMessageTime } from '../../lib/formatMessageTime';
 import { copyTextToClipboard } from '../../lib/clipboard';
 import {
   assistantRenderBlocks,
@@ -199,7 +200,7 @@ const emit = defineEmits<{
   /** Show an Edit/Write tool call's diff in the right-side panel. */
   openToolDiff: [id: string];
   /** Edit + resend the last user message (parent undoes, then refills composer). */
-  editMessage: [text: string];
+  editMessage: [payload: { text: string; images?: { url: string; alt?: string; kind: 'image' | 'video'; fileId?: string }[] }];
   /** Fetch the next older page of messages (triggered by top sentinel visibility or click). */
   loadOlderMessages: [];
   /** Remove a queued message by index. */
@@ -220,10 +221,10 @@ function hasImages(item: QueuedPromptView): boolean {
   return (item.attachments?.length ?? 0) > 0;
 }
 
-function onQueueEdit(index: number, item: QueuedPromptView): void {
-  // Image-carrying prompts can't be round-tripped through the text composer, so
-  // they are remove-only (matches the previous dock queue behaviour).
-  if (hasImages(item)) return;
+function onQueueEdit(index: number): void {
+  // Image/video attachments round-trip through the composer now (the composer
+  // can hold fileIds), so a queued prompt can be loaded back for edit whether or
+  // not it carries media.
   emit('editQueued', index);
 }
 
@@ -317,27 +318,6 @@ const undoingTurnId = ref<string | null>(null);
 let undoFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 const UNDO_FALLBACK_MS = 2500;
 
-// Expanded timestamp state (keyed by turn id)
-const expandedTimeTurnIds = ref<Set<string>>(new Set());
-function isTimeExpanded(turnId: string): boolean {
-  return expandedTimeTurnIds.value.has(turnId);
-}
-function toggleTime(turnId: string): void {
-  const next = new Set(expandedTimeTurnIds.value);
-  if (next.has(turnId)) next.delete(turnId);
-  else next.add(turnId);
-  expandedTimeTurnIds.value = next;
-}
-function displayMessageTime(iso: string, turnId: string): string {
-  if (isTimeExpanded(turnId)) {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    const pad2 = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  }
-  return formatMessageTime(iso, t('conversation.yesterday'));
-}
-
 async function onUndo(turn: ChatTurn): Promise<void> {
   if (
     await confirm({
@@ -353,7 +333,7 @@ async function onUndo(turn: ChatTurn): Promise<void> {
 function confirmEditMessage(turn: ChatTurn): void {
   if (undoingTurnId.value !== null) return;
   undoingTurnId.value = turn.id;
-  emit('editMessage', turn.text);
+  emit('editMessage', { text: turn.text, images: turn.images });
   // Fallback: if the server rewind never removes the turn (e.g. it failed),
   // release the guard so the user can retry.
   undoFallbackTimer = setTimeout(() => {
@@ -387,7 +367,7 @@ function copyConversation(): void {
   if (props.turns.length === 0) return;
   const lines: string[] = [];
   for (const turn of props.turns) {
-    if (turn.role === 'compaction') continue; // dividers don't copy
+    if (turn.role === 'compaction' || turn.role === 'cron') continue; // dividers / cron notices don't copy
     const roleLabel = turn.role === 'user' ? 'User' : 'Assistant';
     const content = turnToMarkdown(turn);
     if (content.trim()) {
@@ -541,7 +521,7 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
       <!-- User turn → right-aligned soft-blue bubble (undo affordance lives
            outside the bubble with an inline confirm step). -->
       <template v-if="turn.role === 'user'">
-        <div class="u-turn" :class="{ 'is-latest-user': turn.id === lastUserTurnId }">
+        <div class="u-turn">
           <div class="u-bub turn-anchor" :class="{ undoing: undoingTurnId === turn.id }" :data-turn-id="turn.id">
             <!-- Image / video attachments -->
             <div v-if="turn.images && turn.images.length > 0" class="u-imgs">
@@ -610,14 +590,7 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
               <Icon v-if="copiedTurn !== turn.id" name="copy" size="sm" />
               <Icon v-else name="check" size="sm" />
             </button>
-            <button
-              v-if="turn.createdAt"
-              type="button"
-              class="u-time"
-              @click.stop="toggleTime(turn.id)"
-            >
-              {{ displayMessageTime(turn.createdAt, turn.id) }}
-            </button>
+            <MessageTime v-if="turn.createdAt" :time="turn.createdAt" />
           </div>
         </div>
       </template>
@@ -638,6 +611,10 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
         <span v-else class="cd-label">{{ compactionDividerLabel(turn) }}</span>
         <span class="cd-line" aria-hidden="true" />
       </div>
+
+      <!-- Cron notice — a turn triggered by a scheduled reminder, rendered as
+           a lightweight in-transcript notice rather than a user bubble. -->
+      <CronNotice v-else-if="turn.role === 'cron'" :text="turn.text" :cron="turn.cron" :turn-id="turn.id" :created-at="turn.createdAt" />
 
       <!-- Assistant turn → left-aligned, no name/role label. -->
       <div v-else class="a-msg turn-anchor" :data-turn-id="turn.id">
@@ -721,9 +698,8 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
           <button
             type="button"
             class="q-body"
-            :title="hasImages(item) ? t('composer.queuedHasImage', { n: item.attachments?.length ?? 0 }) : t('composer.editQueued')"
-            :disabled="hasImages(item)"
-            @click="onQueueEdit(qi, item)"
+            :title="t('composer.editQueued')"
+            @click="onQueueEdit(qi)"
           >
             <span v-if="item.text" class="u-text q-text">{{ item.text }}</span>
             <span v-else class="q-text q-text-placeholder">
@@ -802,6 +778,7 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
 .chat > .u-turn,
 .chat > .a-msg,
 .chat > .compact-divider,
+.chat > .cron-notice,
 .chat > .sending-placeholder,
 .chat > :deep(.activity-notice) {
   margin-top: var(--chat-turn-gap);
@@ -812,32 +789,19 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
 .chat > .u-turn:first-child,
 .chat > .a-msg:first-child,
 .chat > .compact-divider:first-child,
+.chat > .cron-notice:first-child,
 .chat > .sending-placeholder:first-child,
 .chat > :deep(.activity-notice:first-child) {
   margin-top: 0;
 }
 
-/* User turn — wraps the bubble + meta row so they lay out as one right-aligned
-   group and can be pinned together. */
+/* User turn — wraps the bubble + meta row so they lay out as one right-aligned group. */
 .u-turn {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  /* `.chat` is a flex column, so `.u-turn` is a flex item. A flex item defaults
-     to `align-self: stretch`, which prevents `position: sticky` from working.
-     Use a non-stretch alignment (sticky requires it) and keep the group full
-     width explicitly so the bubble's `max-width: 78%` still resolves against
-     the read column. */
   align-self: flex-start;
   width: 100%;
-}
-/* Pin the most recent user turn to the top of the scroll viewport. The meta
-   row lives inside the same wrapper, so it stays attached and never overlaps. */
-.u-turn.is-latest-user {
-  position: sticky;
-  top: 0;
-  z-index: var(--z-sticky);
-  background: var(--bg);
 }
 
 /* User message → right-aligned soft-blue bubble (redesign .p-bubble-user). */
@@ -862,29 +826,7 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
   margin-top: 2px;
   margin-right: 4px;
 }
-.u-meta .u-time {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 5px;
-  background: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font: inherit;
-  font-size: var(--text-base);
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.12s, color 0.12s, background-color 0.12s;
-  white-space: nowrap;
-}
-.u-meta .u-time:hover {
-  opacity: 1;
-  color: var(--color-accent);
-  background: var(--hover);
-}
-.u-meta .u-edit,
-.u-meta .u-time {
+.u-meta .u-edit {
   min-height: 22px;
   box-sizing: border-box;
 }
@@ -1067,6 +1009,7 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
 .a-msg > :deep(.agent-card),
 .a-msg > :deep(.agent-group),
 .a-msg > :deep(.box),
+.a-msg > :deep(.swarm-card),
 .a-msg > :deep(.media-tool) {
   margin-top: var(--chat-block-gap);
 }
@@ -1076,6 +1019,7 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
 .a-msg > :deep(.agent-card:first-child),
 .a-msg > :deep(.agent-group:first-child),
 .a-msg > :deep(.box:first-child),
+.a-msg > :deep(.swarm-card:first-child),
 .a-msg > :deep(.media-tool:first-child) {
   margin-top: 0;
 }
@@ -1259,12 +1203,10 @@ function isStreamingRenderBlock(turn: ChatTurn, block: { sourceIndex: number }):
   border-radius: var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl);
   padding: 11px 15px;
   box-shadow: var(--shc);
-  animation: kimi-bubble-in 0.24s ease-out both;
 }
 .a-msg {
   max-width: 100%;
   width: 100%;
-  animation: kimi-bubble-in 0.24s ease-out both;
 }
 
 /* ---- Inline queue: pending user messages at the tail of the transcript ----

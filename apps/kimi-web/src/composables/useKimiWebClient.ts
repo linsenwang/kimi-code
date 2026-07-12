@@ -4,6 +4,7 @@
 
 import { computed, reactive, ref, watch } from 'vue';
 import { i18n } from '../i18n';
+import { traceClientEvent } from '../debug/trace';
 import { getKimiWebApi } from '../api';
 import { isDaemonApiError, isDaemonNetworkError } from '../api/errors';
 import {
@@ -13,6 +14,7 @@ import {
   type WorkspaceSortMode,
 } from '../lib/workspaceOrder';
 import { mergeWorkspaces } from '../lib/mergeWorkspaces';
+import { mergeSnapshotMessages } from '../lib/snapshotMessages';
 import { createCoalescedAsyncRunner } from '../lib/snapshotSync';
 import {
   loadUnread,
@@ -28,7 +30,7 @@ import {
 } from '../lib/storage';
 import { createEventBatcher, isRenderEvent } from './client/eventBatcher';
 import { useAppearance } from './client/useAppearance';
-import { useNotification } from './client/useNotification';
+import { useNotification, shouldNotifyCompletion } from './client/useNotification';
 import { useSoundNotification } from './client/useSoundNotification';
 import { useTaskPoller } from './client/useTaskPoller';
 import { useModelProviderState } from './client/useModelProviderState';
@@ -64,8 +66,8 @@ import { toAppEvent } from '../api/daemon/mappers';
 
 import { messagesToTurns } from './messagesToTurns';
 import { latestTodos } from './latestTodos';
-import { buildSwarmGroups, countSwarmMembers } from './swarmGroups';
-import type { SwarmGroup } from './swarmGroups';
+import { buildSwarmGroups, countSwarmMembers, swarmMembersByToolCall } from './swarmGroups';
+import type { SwarmGroup, SwarmMember } from './swarmGroups';
 import type {
   ActivityState,
   ActivationBadges,
@@ -280,6 +282,12 @@ interface QueuedPrompt {
 export interface ExtendedState extends KimiClientState {
   connected: boolean;
   serverVersion: string;
+  /**
+   * True when the connected server reports `dangerous_bypass_auth` in `/meta`,
+   * meaning its bearer-token gate is disabled. The UI skips the server-token
+   * prompt and connects without a credential.
+   */
+  dangerousBypassAuth: boolean;
   workspaceName: string;
   connection: ConnectionState;
   permission: PermissionMode;
@@ -351,6 +359,7 @@ const rawState: ExtendedState = reactive({
   ...createInitialState(),
   connected: false,
   serverVersion: '',
+  dangerousBypassAuth: false,
   workspaceName: 'kimi-web',
   connection: 'disconnected' as ConnectionState,
   permission: loadPermissionFromStorage(),
@@ -459,10 +468,34 @@ if (typeof window !== 'undefined') {
   });
 }
 
+/**
+ * When the tab returns to the foreground, the WebSocket may be a silent
+ * half-open: the browser still reports OPEN (so no auto-reconnect) yet no
+ * frames have arrived for a while (frozen background tab, dropped NAT mapping,
+ * daemon restart). On such a socket live streaming tokens freeze mid-turn with
+ * no recovery short of a full page reload.
+ *
+ * If the socket looks stale, force a clean reconnect — the handshake
+ * re-subscribes at the last durable cursor — then refresh the active session
+ * from its authoritative snapshot to re-seed the volatile streaming tokens lost
+ * during the gap.
+ */
+function recoverStaleConnection(): void {
+  if (eventConn === null) return;
+  if (!eventConn.health().stale) return;
+  traceClientEvent('ws: stale socket on focus, reconnecting', {
+    activeSessionId: rawState.activeSessionId,
+  });
+  eventConn.reconnect();
+  const active = rawState.activeSessionId;
+  if (active) snapshotSyncRunner.request(active);
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       clearActiveUnread();
+      recoverStaleConnection();
     }
   });
 }
@@ -593,8 +626,15 @@ async function refreshSessionStatus(sessionId: string): Promise<void> {
   rawState.planModeBySession = { ...rawState.planModeBySession, [sessionId]: st.planMode };
 }
 
-/** Persist runtime controls to the active session via POST /profile, then
- *  re-read /status. Fire-and-forget: the UI already updated optimistically. */
+/** Persist runtime controls to a session via POST /profile, then re-read
+ *  /status. `sessionId` overrides the active session — used when creating a
+ *  session and immediately persisting its draft modes, so a concurrent session
+ *  switch can't write the patch to the wrong session.
+ *
+ *  Returns the update promise (errors swallowed — the UI already updated
+ *  optimistically). Most callers fire-and-forget via `void persistSessionProfile(...)`;
+ *  call sites that must order strictly after the profile (e.g. a skill
+ *  activation that can't carry its own modes) await it. */
 function persistSessionProfile(patch: {
   model?: string;
   permissionMode?: string;
@@ -603,11 +643,11 @@ function persistSessionProfile(patch: {
   goalObjective?: string;
   goalControl?: 'pause' | 'resume' | 'cancel';
   thinking?: string;
-}): void {
-  const sid = rawState.activeSessionId;
-  if (!sid) return;
+}, sessionId?: string): Promise<void> {
+  const sid = sessionId ?? rawState.activeSessionId;
+  if (!sid) return Promise.resolve();
   // Promise.resolve wrap: tolerate a sync/undefined return (e.g. test mocks).
-  void Promise.resolve(getKimiWebApi().updateSession(sid, patch))
+  return Promise.resolve(getKimiWebApi().updateSession(sid, patch))
     .then(() => refreshSessionStatus(sid))
     .catch(() => {
       /* ignore — local state already reflects the change */
@@ -820,6 +860,11 @@ function processEvent(appEvent: AppEvent, meta: { sessionId: string; seq: number
   if (appEvent.type === 'questionRequested') {
     onQuestionRequested(appEvent.sessionId, appEvent.question);
   }
+
+  // The agent needs approval for a tool call — surface it so the user comes back.
+  if (appEvent.type === 'approvalRequested') {
+    onApprovalRequested(appEvent.sessionId, appEvent.approval);
+  }
 }
 
 const enqueueEvent = createEventBatcher<PendingEvent>(
@@ -889,6 +934,12 @@ function connectEventsIfNeeded(): void {
     onConnectionChange(connected: boolean) {
       rawState.connected = connected;
       rawState.connection = connected ? 'connected' : 'disconnected';
+      // The data channel is healthy again (server_hello received). Clear any
+      // stale "Realtime connection error" toast instead of relying on its
+      // auto-dismiss timer: iOS Safari freezes timers while a tab is
+      // backgrounded, so the toast would otherwise linger until a manual
+      // refresh even though the reconnect already succeeded.
+      if (connected) dismissWsError();
     },
   });
 }
@@ -1055,6 +1106,19 @@ function pushWarning(warning: AppWarning): void {
   rawState.warnings = [...rawState.warnings, warning];
 }
 
+// Drop every "Realtime connection error" notice pushed by the WS onError
+// handler. Matched by severity + the localized wsTitle (the same i18n instance
+// used to push it), so other errors are left untouched.
+function dismissWsError(): void {
+  const title = i18n.global.t('warnings.wsTitle');
+  const next = rawState.warnings.filter(
+    (w) => !(typeof w === 'object' && w !== null && w.severity === 'error' && w.title === title),
+  );
+  if (next.length !== rawState.warnings.length) {
+    rawState.warnings = next;
+  }
+}
+
 function pushOperationFailure(
   operation: string,
   err: unknown,
@@ -1130,7 +1194,12 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
           ? snap.session.model
           : s.model,
     }));
-    setSessionMessages(sessionId, snap.messages);
+    // The snapshot only carries the most recent page; keep any older pages the
+    // user already loaded so reopening does not reset scrollback.
+    setSessionMessages(
+      sessionId,
+      mergeSnapshotMessages(rawState.messagesBySession[sessionId] ?? [], snap.messages),
+    );
     rawState.messagesHasMoreBySession = {
       ...rawState.messagesHasMoreBySession,
       [sessionId]: snap.hasMoreMessages,
@@ -1253,38 +1322,19 @@ function dropWsSubscription(sessionId: string): void {
   sessionsWithStaleCursor.delete(sessionId);
 }
 
-function subscribeToSessionEvents(sessionId: string): void {
-  connectEventsIfNeeded();
-  if (eventConn) {
-    // Apply any queued streaming deltas before re-subscribing so the transcript
-    // is current. (These deltas are volatile — never replayed by the server and
-    // they don't advance lastSeqBySession — but flushing here is cheap and
-    // future-proofs the cursor if the batching set ever changes.)
-    enqueueEvent.flush();
-    const seq = rawState.lastSeqBySession[sessionId] ?? 0;
-    const epoch = epochBySession[sessionId];
-    eventConn.subscribe(sessionId, { seq, epoch });
-    retainWsSubscription(sessionId);
-  }
-}
-
-/** Re-open an already-loaded session. If it was evicted from the subscription
- *  cap since it was last open, rebuild from a snapshot: resuming from the kept
- *  cursor would skip the per-session events that arrived while unsubscribed,
- *  and replaying from seq 0 would make the projector regenerate message ids and
- *  duplicate the already-loaded transcript. Otherwise just re-subscribe from the
- *  tracked cursor.
+/** Re-open an already-loaded session: always rebuild from a fresh snapshot.
  *
- * The stale marker is only read here; `syncSessionFromSnapshot` clears it once
- * the snapshot succeeds. If the snapshot fails transiently the marker stays, so
- * the next re-open retries the snapshot instead of falling back to a cursor
- * that may have skipped events while unsubscribed. */
+ *  Volatile `assistant.delta` frames are never journaled or replayed: if a
+ *  transport hiccup covered the tail of a turn while the user was away, the
+ *  local transcript silently lost the model's final text, and a cursor
+ *  resubscribe has nothing to recover it with. Always fetching the authoritative
+ *  snapshot keeps the logic trivially correct (no freshness heuristics, no
+ *  races to reason about); the snapshot is cheap server-side (LRU on the wire
+ *  file). Trade-off: a snapshot GET in flight during a steep local send can
+ *  momentarily overwrite that optimistic message — the user notices immediately
+ *  and the next re-open (or a refresh) reconciles. */
 async function reopenSession(sessionId: string): Promise<SyncSessionResult> {
-  if (sessionsWithStaleCursor.has(sessionId)) {
-    return syncSessionFromSnapshot(sessionId);
-  }
-  subscribeToSessionEvents(sessionId);
-  return 'ok';
+  return syncSessionFromSnapshot(sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1297,10 +1347,10 @@ async function reopenSession(sessionId: string): Promise<SyncSessionResult> {
     running task is its BTW side-channel agent should not look busy. When tasks
     have not been loaded yet — e.g. right after a page refresh — we trust the
     daemon-reported `running` status rather than hiding the spinner. */
-function isSessionEffectivelyRunning(sessionId: string): boolean {
-  const session = rawState.sessions.find((s) => s.id === sessionId);
+function isSessionEffectivelyRunning(session: AppSession | undefined): boolean {
   if (!session) return false;
   if (session.status !== 'running') return false;
+  const sessionId = session.id;
   const hiddenBtwAgentId = sideChat.sideChatTargetBySession.value[sessionId]?.agentId;
   const tasks = rawState.tasksBySession[sessionId] ?? [];
   const runningTasks = tasks.filter((t) => t.status === 'running');
@@ -1330,7 +1380,7 @@ function formatTime(iso: string, _status: string): string {
     const diffD = diffMs / 86400000;
     if (diffD < 7) return `${Math.round(diffD)}d`;
     if (diffD < 30) return `${Math.round(diffD / 7)}w`;
-    if (diffD < 365) return `${Math.round(diffD / 30)}m`;
+    if (diffD < 365) return `${Math.round(diffD / 30)}mo`;
     return `${Math.round(diffD / 365)}y`;
   } catch {
     return iso;
@@ -1614,17 +1664,19 @@ const sessions = computed<Session[]>(() => {
       title: s.title,
       time: formatTime(s.updatedAt, s.status),
       status: s.status,
-      busy: isSessionEffectivelyRunning(s.id),
+      busy: isSessionEffectivelyRunning(s),
     }));
 });
 
 const activeSessionId = computed<string>(() => rawState.activeSessionId ?? '');
 
-/** Slash-invocable skills for the active session (feeds the composer `/` menu). */
+/** Slash-invocable skills for the composer `/` menu — the active session's skills,
+ *  or, before a session exists, the active workspace's skills. */
 const skills = computed<AppSkill[]>(() => {
   const sid = rawState.activeSessionId;
-  if (!sid) return [];
-  return modelProvider.skillsBySession.value[sid] ?? [];
+  if (sid) return modelProvider.skillsBySession.value[sid] ?? [];
+  const wid = activeWorkspaceId.value;
+  return wid ? (modelProvider.skillsByWorkspace.value[wid] ?? []) : [];
 });
 
 const isSending = computed<boolean>(() => {
@@ -1633,11 +1685,17 @@ const isSending = computed<boolean>(() => {
   return rawState.sendingBySession[sid] ?? false;
 });
 
+// True while the empty-composer first prompt for the active workspace is being
+// created + submitted (before the session id exists). Drives the empty-session
+// "starting conversation…" loading state in ConversationPane / Composer.
+const isStartingFirstPrompt = computed<boolean>(() => workspaceState.isStartingFirstPrompt());
+
 const sideChat = useSideChat(rawState, {
   pushOperationFailure,
   nextOptimisticMsgId,
   connectEventsIfNeeded,
   getEventConn: () => eventConn,
+  models: () => modelProvider.models.value,
 });
 
 const activeAppTasks = computed<AppTask[]>(() => {
@@ -1660,7 +1718,6 @@ const turns = computed<ChatTurn[]>(() => {
     approvals,
     (fileId) => getKimiWebApi().getFileUrl(fileId),
     activity.value !== 'idle',
-    activeAppTasks.value,
     rawState.planReviewByToolCallId,
   );
 });
@@ -1672,6 +1729,11 @@ const tasks = computed<TaskItem[]>(() => {
 });
 
 const swarms = computed<SwarmGroup[]>(() => buildSwarmGroups(activeAppTasks.value));
+// Foreground/background subagents keyed by their spawning tool call id — used by
+// the inline AgentSwarm tool card to stream each subagent's live progress.
+const swarmMembersByToolCallId = computed<Map<string, SwarmMember[]>>(() =>
+  swarmMembersByToolCall(activeAppTasks.value),
+);
 
 const goal = computed<AppGoal | null>(() => {
   const sid = rawState.activeSessionId;
@@ -1710,6 +1772,17 @@ const loadMoreMessagesError = computed<boolean>(() => {
   return sid ? rawState.messagesLoadMoreErrorBySession[sid] ?? false : false;
 });
 const serverVersion = computed<string>(() => rawState.serverVersion);
+const dangerousBypassAuth = computed<boolean>(() => rawState.dangerousBypassAuth);
+
+/**
+ * Drop the cached `dangerous_bypass_auth` value read from `/meta`. Called when
+ * the server demands authentication (HTTP 401) so a stale "bypass" value from
+ * a previous server mode does not keep hiding the token prompt after the same
+ * origin is restarted without `--dangerous-bypass-auth`.
+ */
+function clearDangerousBypassAuth(): void {
+  rawState.dangerousBypassAuth = false;
+}
 
 const permission = computed<PermissionMode>(() => rawState.permission);
 const thinking = computed<ThinkingLevel>(() => rawState.thinking);
@@ -1802,7 +1875,8 @@ const activity = computed<ActivityState>(() => {
   const questionList = rawState.questionsBySession[sid] ?? [];
   if (questionList.length > 0) return 'awaiting-question';
 
-  if (isSessionEffectivelyRunning(sid)) {
+  const activeSession = rawState.sessions.find((s) => s.id === sid);
+  if (isSessionEffectivelyRunning(activeSession)) {
     return 'running';
   }
 
@@ -1876,7 +1950,11 @@ const status = computed<ConversationStatus>(() => {
 
   // Use the friendly displayName from the models list; fall back to stripping
   // the provider prefix (e.g. "moonshot/moonshot-v1-128k" → "moonshot-v1-128k").
-  const matched = modelProvider.models.value.find((m) => m.id === rawModel || m.model === rawModel);
+  // Prefer the exact id — model names can collide across providers, so a
+  // name-only match may resolve to the wrong provider's entry.
+  const matched =
+    modelProvider.models.value.find((m) => m.id === rawModel) ??
+    modelProvider.models.value.find((m) => m.model === rawModel);
   const displayModel =
     matched?.displayName ||
     matched?.model ||
@@ -2030,6 +2108,21 @@ const activeWorkspaceId = computed<string | null>(() => {
   return list[0]?.id ?? null;
 });
 
+// Pre-warm workspace-scoped skills so the onboarding composer's `/` menu is
+// populated before a session exists. Loaded once per workspace (guard mirrors
+// the per-session guard in refreshSessionSidecars); session skills take over
+// via refreshSessionSidecars once a session is created.
+watch(
+  activeWorkspaceId,
+  (id) => {
+    if (!id) return;
+    if (!Object.prototype.hasOwnProperty.call(modelProvider.skillsByWorkspace.value, id)) {
+      void modelProvider.loadSkillsForWorkspace(id);
+    }
+  },
+  { immediate: true },
+);
+
 /** The active workspace as a sidebar view (or null when none). */
 const visibleWorkspace = computed<WorkspaceView | null>(() => {
   const id = activeWorkspaceId.value;
@@ -2060,7 +2153,7 @@ const sessionsForView = computed<Session[]>(() => {
         title: s.title,
         time: formatTime(s.updatedAt, s.status),
         status: s.status,
-        busy: isSessionEffectivelyRunning(s.id),
+        busy: isSessionEffectivelyRunning(s),
         lastPrompt: s.lastPrompt,
         workspaceId,
         workspaceName: nameByWorkspaceId.get(workspaceId),
@@ -2082,7 +2175,7 @@ const workspaceGroups = computed<WorkspaceGroup[]>(() => {
       title: s.title,
       time: formatTime(s.updatedAt, s.status),
       status: s.status,
-      busy: isSessionEffectivelyRunning(s.id),
+      busy: isSessionEffectivelyRunning(s),
       updatedAt: s.updatedAt,
     };
     const list = byId.get(wid) ?? [];
@@ -2237,10 +2330,27 @@ const workspaceState = useWorkspaceState(rawState, {
   fileDiffLoading,
 });
 
+/** True when the user is actually watching this session: it is the active
+    session, the page is visible, and the window has focus. Focus matters on
+    top of visibility: a window that lost focus to another app often stays
+    (partially) visible on screen, but the user is working elsewhere and would
+    miss the moment without a notification. */
+function isUserWatching(sid: string): boolean {
+  return (
+    sid === rawState.activeSessionId &&
+    typeof document !== 'undefined' &&
+    document.visibilityState === 'visible' &&
+    document.hasFocus()
+  );
+}
+
 function onSessionIdle(sid: string, status: 'idle' | 'aborted'): void {
   // The turn finished — this session no longer has a prompt in flight.
   inFlightPromptSessions.delete(sid);
   rawState.sendingBySession = { ...rawState.sendingBySession, [sid]: false };
+  // Capture before the cleanup below drops it — it keys the completion
+  // notification's dedup tag so each finished turn alerts once.
+  const finishedPromptId = rawState.promptIdBySession[sid];
   // Drop any cached prompt_id so a later skill activation (which has no
   // prompt_id) doesn't accidentally reuse this stale id for :abort.
   if (rawState.promptIdBySession[sid] !== undefined) {
@@ -2265,16 +2375,20 @@ function onSessionIdle(sid: string, status: 'idle' | 'aborted'): void {
   }
 
   // Browser notification when the user isn't watching this session.
-  notification.maybeNotifyCompletion(sid, {
-    isActiveAndVisible:
-      sid === rawState.activeSessionId &&
-      typeof document !== 'undefined' &&
-      document.visibilityState === 'visible',
-    sessionTitle: rawState.sessions.find((s) => s.id === sid)?.title ?? '',
-    onClick: () => {
-      void workspaceState.selectSession(sid);
-    },
-  });
+  // Only real completions notify; aborted turns and turns that ended up
+  // blocked on approval/question do not fire the generic "Turn finished" alert.
+  const hasPendingApproval = (rawState.approvalsBySession[sid] ?? []).length > 0;
+  const hasPendingQuestion = (rawState.questionsBySession[sid] ?? []).length > 0;
+  if (shouldNotifyCompletion(status, hasPendingApproval, hasPendingQuestion)) {
+    notification.maybeNotifyCompletion(sid, {
+      isUserWatching: isUserWatching(sid),
+      sessionTitle: rawState.sessions.find((s) => s.id === sid)?.title ?? '',
+      promptId: finishedPromptId,
+      onClick: () => {
+        void workspaceState.selectSession(sid);
+      },
+    });
+  }
 
   // Completion sound — only for real completions (aborted/cancelled turns stay
   // silent). Plays regardless of visibility so it also reaches a backgrounded tab.
@@ -2313,13 +2427,11 @@ function onQuestionRequested(sid: string, question: AppQuestionRequest): void {
     header && questionText ? `${header}: ${questionText}` : questionText || header;
 
   // Browser notification when the user isn't watching this session.
-  notification.maybeNotifyQuestion(sid, {
-    isActiveAndVisible:
-      sid === rawState.activeSessionId &&
-      typeof document !== 'undefined' &&
-      document.visibilityState === 'visible',
+  notification.maybeNotifyQuestion({
+    isUserWatching: isUserWatching(sid),
     sessionTitle: rawState.sessions.find((s) => s.id === sid)?.title ?? '',
     questionPreview: preview,
+    questionId: question.questionId,
     onClick: () => {
       void workspaceState.selectSession(sid);
     },
@@ -2328,6 +2440,23 @@ function onQuestionRequested(sid: string, question: AppQuestionRequest): void {
   // Attention sound — plays regardless of visibility so it also reaches a
   // backgrounded tab (same as the completion sound).
   sound.maybePlayQuestionSound();
+}
+
+function onApprovalRequested(sid: string, approval: AppApprovalRequest): void {
+  // Browser notification when the user isn't watching this session.
+  notification.maybeNotifyApproval({
+    isUserWatching: isUserWatching(sid),
+    sessionTitle: rawState.sessions.find((s) => s.id === sid)?.title ?? '',
+    toolName: approval.toolName,
+    approvalId: approval.approvalId,
+    onClick: () => {
+      void workspaceState.selectSession(sid);
+    },
+  });
+
+  // Attention sound — plays regardless of visibility so it also reaches a
+  // backgrounded tab (same as the completion sound).
+  sound.maybePlayApprovalSound();
 }
 
 // ---------------------------------------------------------------------------
@@ -2364,6 +2493,7 @@ export function useKimiWebClient() {
     todos,
     goal,
     swarms,
+    swarmMembersByToolCallId,
     activationBadges,
     compaction,
     status,
@@ -2387,6 +2517,8 @@ export function useKimiWebClient() {
     hasMoreMessages,
     loadMoreMessagesError,
     serverVersion,
+    dangerousBypassAuth,
+    clearDangerousBypassAuth,
     initialized,
     permission,
     thinking,
@@ -2398,6 +2530,7 @@ export function useKimiWebClient() {
     questions,
     activity,
     isSending,
+    isStartingFirstPrompt,
     fastMoon: appearance.fastMoon,
 
     // Model + Provider reactive state
@@ -2420,9 +2553,11 @@ export function useKimiWebClient() {
     setAccent: appearance.setAccent,
     notifyOnComplete: notification.notifyOnComplete,
     notifyOnQuestion: notification.notifyOnQuestion,
+    notifyOnApproval: notification.notifyOnApproval,
     notifyPermission: notification.notifyPermission,
     setNotifyOnComplete: notification.setNotifyOnComplete,
     setNotifyOnQuestion: notification.setNotifyOnQuestion,
+    setNotifyOnApproval: notification.setNotifyOnApproval,
     soundOnComplete: sound.soundOnComplete,
     setSoundOnComplete: sound.setSoundOnComplete,
     onboarded,
@@ -2442,6 +2577,8 @@ export function useKimiWebClient() {
     openWorkspace: workspaceState.openWorkspace,
     openWorkspaceDraft: workspaceState.openWorkspaceDraft,
     startSessionAndSendPrompt: workspaceState.startSessionAndSendPrompt,
+    startSessionAndActivateSkill: workspaceState.startSessionAndActivateSkill,
+    startSessionAndOpenSideChat: workspaceState.startSessionAndOpenSideChat,
     addWorkspaceByPath: workspaceState.addWorkspaceByPath,
     browseFs: workspaceState.browseFs,
     getFsHome: workspaceState.getFsHome,
@@ -2485,6 +2622,8 @@ export function useKimiWebClient() {
     reorderWorkspaces,
     setWorkspaceSortMode,
     archiveSession: workspaceState.archiveSession,
+    restoreSession: workspaceState.restoreSession,
+    loadArchivedSessions: workspaceState.loadArchivedSessions,
     compact: workspaceState.compact,
     forkSession: workspaceState.forkSession,
     undo: workspaceState.undo,

@@ -54,7 +54,7 @@ export interface UseModelProviderStateDeps {
     opts?: { title?: string; message?: string; sessionId?: string },
   ) => void;
   refreshSessionStatus: (sessionId: string) => Promise<void>;
-  persistSessionProfile: (patch: PersistSessionProfilePatch) => void;
+  persistSessionProfile: (patch: PersistSessionProfilePatch, sessionId?: string) => Promise<void>;
   activity: ComputedRef<ActivityState>;
   inFlightPromptSessions: Set<string>;
   saveThinkingToStorage: (v: ThinkingLevel) => void;
@@ -90,6 +90,9 @@ export function useModelProviderState(
   // Session-scoped skills (slash-invocable). Loaded lazily per session; the active
   // session's list feeds the composer's `/` menu.
   const skillsBySession = ref<Record<string, AppSkill[]>>({});
+  // Workspace-scoped skills, used to populate the `/` menu before a session exists
+  // (onboarding composer). Keyed by workspace id; loaded once per workspace.
+  const skillsByWorkspace = ref<Record<string, AppSkill[]>>({});
   const providers = ref<AppProvider[]>([]);
 
   // Model picked while in the "new session draft" state (onboarding composer —
@@ -99,7 +102,11 @@ export function useModelProviderState(
 
   function modelById(modelId: string | null | undefined): AppModel | undefined {
     if (modelId === undefined || modelId === null || modelId.length === 0) return undefined;
-    return models.value.find((m) => m.id === modelId || m.model === modelId);
+    // Prefer the exact id — model names can collide across providers.
+    return (
+      models.value.find((m) => m.id === modelId) ??
+      models.value.find((m) => m.model === modelId)
+    );
   }
 
   function activeThinkingModel(): AppModel | undefined {
@@ -124,6 +131,17 @@ export function useModelProviderState(
     } catch {
       // Skills are side data; an older daemon without /skills just yields no
       // slash-skills, the built-in commands still work.
+    }
+  }
+
+  async function loadSkillsForWorkspace(workspaceId: string): Promise<void> {
+    try {
+      const api = getKimiWebApi();
+      const list = await api.listSkillsForWorkspace(workspaceId);
+      skillsByWorkspace.value = { ...skillsByWorkspace.value, [workspaceId]: list };
+    } catch {
+      // Side data; an older daemon without /workspaces/{id}/skills just yields
+      // no slash-skills for the onboarding composer.
     }
   }
 
@@ -167,8 +185,12 @@ export function useModelProviderState(
    * can return model '', so the authoritative current model comes from
    * GET /sessions/{id}/status, which we re-read right after. Optimistically show
    * the chosen id meanwhile. Never crashes.
+   *
+   * Returns whether the switch was accepted (true for the draft path too), so
+   * callers can gate follow-up persistence (e.g. bumping the global default) on
+   * a confirmed switch — errors are surfaced here, not thrown.
    */
-  async function setModel(modelId: string): Promise<void> {
+  async function setModel(modelId: string): Promise<boolean> {
     const sid = rawState.activeSessionId;
     const nextThinking = coerceThinkingForModel(modelById(modelId), rawState.thinking);
     const prevThinking = rawState.thinking;
@@ -177,7 +199,7 @@ export function useModelProviderState(
       // Remember the pick — startSessionAndSendPrompt applies it at create time.
       draftModel.value = modelId;
       applyThinkingLevel(nextThinking);
-      return;
+      return true;
     }
     // Optimistic: show the chosen model immediately, but remember the previous
     // one so we can roll back if the switch never reaches the daemon.
@@ -203,12 +225,13 @@ export function useModelProviderState(
         saveThinkingToStorage(prevThinking);
       }
       pushOperationFailure('setModel', err, { sessionId: sid });
-      return;
+      return false;
     }
     // refreshSessionStatus folds the authoritative current model from /status
     // back into the session (the profile echo can return ''). Best-effort: a
     // failure here does not mean the switch failed, so it must not roll back.
     await refreshSessionStatus(sid);
+    return true;
   }
 
   /** Toggle whether a model is starred (favorited) in the model picker. */
@@ -227,9 +250,13 @@ export function useModelProviderState(
    * Activate a session skill (the web analogue of typing `/<skill> <args>` in the
    * TUI). The daemon starts a turn with a `skill_activation` origin; progress
    * arrives over the WS stream like any other turn. Never crashes the caller.
+   *
+   * `sessionId` overrides the active session — used when activating right after
+   * creating a session, so a concurrent session switch can't redirect the
+   * activation to the wrong session. No session at all is a no-op.
    */
-  async function activateSkill(skillName: string, args?: string): Promise<void> {
-    const sid = rawState.activeSessionId;
+  async function activateSkill(skillName: string, args?: string, sessionId?: string): Promise<void> {
+    const sid = sessionId ?? rawState.activeSessionId;
     if (!sid) return;
     const guarded = activity.value === 'idle' && !inFlightPromptSessions.has(sid);
     const tempId = `msg_skill_opt_${Date.now().toString(36)}`;
@@ -373,7 +400,7 @@ export function useModelProviderState(
    *  session profile so the daemon's /status reflects it; still sent per-prompt). */
   function setThinking(level: ThinkingLevel): void {
     const next = applyThinkingLevel(level);
-    persistSessionProfile({ thinking: next });
+    void persistSessionProfile({ thinking: next });
   }
 
   return {
@@ -383,8 +410,10 @@ export function useModelProviderState(
     providers,
     draftModel,
     skillsBySession,
+    skillsByWorkspace,
     // actions
     loadSkillsForSession,
+    loadSkillsForWorkspace,
     loadModels,
     refreshOAuthProviderModels,
     loadProviders,

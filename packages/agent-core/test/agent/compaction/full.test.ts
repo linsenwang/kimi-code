@@ -5,6 +5,7 @@ import { join } from 'pathe';
 import {
   APIConnectionError,
   APIContextOverflowError,
+  APIRequestTooLargeError,
   APIStatusError,
   generate as runKosongGenerate,
   UNKNOWN_CAPABILITY,
@@ -76,6 +77,8 @@ describe('FullCompaction', () => {
       [wire] context.append_message     { "message": { "role": "user", "content": [ { "type": "text", "text": "recent user three" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
       [wire] full_compaction.begin      { "source": "manual", "instruction": "Keep the important test facts.", "time": "<time>" }
       [emit] compaction.started         { "trigger": "manual", "instruction": "Keep the important test facts." }
+      [wire] llm.tools_snapshot         { "hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "tools": [], "time": "<time>" }
+      [wire] llm.request                { "kind": "compaction", "provider": "kimi", "model": "kimi-code", "modelAlias": "kimi-code", "thinkingEffort": "off", "maxTokens": 131072, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "messageCount": 7, "droppedCount": 0, "time": "<time>" }
       [wire] usage.record               { "model": "kimi-code", "usage": { "inputOther": 1181, "output": 8, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "session", "time": "<time>" }
       [emit] agent.status.updated       { "model": "kimi-code", "contextTokens": 120, "maxContextTokens": 256000, "contextUsage": 0.00046875, "planMode": false, "swarmMode": false, "permission": "manual", "usage": { "byModel": { "kimi-code": { "inputOther": 1181, "output": 8, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 1181, "output": 8, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
       [wire] context.apply_compaction   { "summary": "Compacted summary.", "contextSummary": "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.\\nCompacted summary.", "compactedCount": 6, "tokensBefore": 39, "tokensAfter": 158, "keptUserMessageCount": 3, "time": "<time>" }
@@ -360,7 +363,7 @@ describe('FullCompaction', () => {
     expect(messageText(compactionCall?.history[5])).toBe('lookup result');
   });
 
-  it('force-refreshes OAuth credentials on compaction 401 and falls back to login_required when replay 401', async () => {
+  it('force-refreshes OAuth credentials on compaction 401 and treats replay 401 as provider auth error', async () => {
     const tokenCalls: Array<boolean | undefined> = [];
     const authKeys: string[] = [];
     const oauthOptions = oauthTestAgentOptions(async (options) => {
@@ -396,7 +399,7 @@ describe('FullCompaction', () => {
       expect.objectContaining({
         event: 'error',
         args: expect.objectContaining({
-          code: 'auth.login_required',
+          code: 'provider.auth_error',
           details: expect.objectContaining({
             statusCode: 401,
             requestId: 'req-compact-401',
@@ -555,6 +558,142 @@ describe('FullCompaction', () => {
         retry_count: 1,
       }),
     });
+    await ctx.expectResumeMatches();
+  });
+
+  it('strips media to text markers and retries when the summarizer request is rejected as too large', async () => {
+    let attempts = 0;
+    const histories: Message[][] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      histories.push(structuredClone(history));
+      if (attempts === 1) {
+        throw new APIRequestTooLargeError(413, 'Request exceeds the maximum size', 'req-413');
+      }
+      return textResult('Compacted without media.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    // A ReadMediaFile-shaped result: path wrapper text around inline image data.
+    ctx.agent.context.appendUserMessage(
+      [
+        { type: 'text', text: '<image path="/workspace/shot.png">' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,AAAA' } },
+        { type: 'text', text: '</image>' },
+      ],
+      { kind: 'user' },
+    );
+    ctx.agent.context.appendUserMessage(
+      [
+        { type: 'video_url', videoUrl: { url: 'data:video/mp4;base64,BBBB' } },
+        { type: 'audio_url', audioUrl: { url: 'data:audio/mp3;base64,CCCC' } },
+      ],
+      { kind: 'user' },
+    );
+    const compacted = ctx.once('context.apply_compaction');
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await compacted;
+    await completed;
+
+    expect(attempts).toBe(2);
+    // The first attempt goes out with the media as-is.
+    const firstParts = histories[0]!.flatMap((message) => message.content);
+    expect(firstParts.some((part) => part.type === 'image_url')).toBe(true);
+    // The 413 retry replaces every media part with a text marker; the
+    // ReadMediaFile path wrapper survives so the summary can still reference
+    // the file, and no base64 payload leaks into the retried request.
+    // (Projection may merge adjacent text parts, so assert on the joined text.)
+    const retryParts = histories[1]!.flatMap((message) => message.content);
+    expect(retryParts.some((part) => part.type !== 'text' && part.type !== 'think')).toBe(false);
+    const retryText = retryParts
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n');
+    expect(retryText).toContain('[image]');
+    expect(retryText).toContain('[video]');
+    expect(retryText).toContain('[audio]');
+    expect(retryText).toContain('<image path="/workspace/shot.png">');
+    expect(JSON.stringify(histories[1])).not.toContain('base64');
+    // Stripping is not an overflow shrink: the retry drops no messages.
+    expect(histories[1]!.length).toBe(histories[0]!.length);
+    // The real history is untouched: recent kept user messages retain media.
+    const keptParts = ctx.agent.context.history.flatMap((message) => message.content);
+    expect(keptParts.some((part) => part.type === 'image_url')).toBe(true);
+    await ctx.expectResumeMatches();
+  });
+
+  it('shrinks the history when the summarizer request stays too large after media stripping', async () => {
+    let attempts = 0;
+    const histories: Message[][] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      histories.push(structuredClone(history));
+      if (attempts <= 2) {
+        throw new APIRequestTooLargeError(413, 'Request exceeds the maximum size');
+      }
+      return textResult('Recovered after shrink.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'old user two', 'old assistant two', 40);
+    ctx.appendExchange(3, 'recent user three', 'recent assistant three', 120);
+    ctx.agent.context.appendUserMessage(
+      [{ type: 'image_url', imageUrl: { url: 'data:image/png;base64,AAAA' } }],
+      { kind: 'user' },
+    );
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await completed;
+
+    expect(attempts).toBe(3);
+    // Attempt 2 is the media strip: same message count, no media parts.
+    expect(histories[1]!.length).toBe(histories[0]!.length);
+    expect(
+      histories[1]!.flatMap((m) => m.content).some((part) => part.type === 'image_url'),
+    ).toBe(false);
+    // Attempt 3 falls through to the overflow shrink and drops old messages.
+    expect(histories[2]!.length).toBeLessThan(histories[1]!.length);
+    await ctx.expectResumeMatches();
+  });
+
+  it('shrinks immediately on a too-large rejection when the history has no media', async () => {
+    let attempts = 0;
+    const histories: Message[][] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      histories.push(structuredClone(history));
+      if (attempts === 1) {
+        throw new APIRequestTooLargeError(413, 'Request exceeds the maximum size');
+      }
+      return textResult('Recovered after shrink.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'old user two', 'old assistant two', 40);
+    ctx.appendExchange(3, 'recent user three', 'recent assistant three', 120);
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await completed;
+
+    // With no media to strip, the too-large rejection goes straight to the
+    // overflow shrink instead of wasting a retry on an identical request.
+    expect(attempts).toBe(2);
+    expect(histories[1]!.length).toBeLessThan(histories[0]!.length);
     await ctx.expectResumeMatches();
   });
 
@@ -1030,6 +1169,8 @@ describe('FullCompaction', () => {
       [wire] full_compaction.begin      { "source": "manual", "time": "<time>" }
       [emit] compaction.started         { "trigger": "manual" }
       [wire] context.append_message     { "message": { "role": "user", "content": [ { "type": "text", "text": "new user while compacting" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+      [wire] llm.tools_snapshot         { "hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "tools": [], "time": "<time>" }
+      [wire] llm.request                { "kind": "compaction", "provider": "kimi", "model": "kimi-code", "modelAlias": "kimi-code", "thinkingEffort": "off", "maxTokens": 131072, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "messageCount": 5, "droppedCount": 0, "time": "<time>" }
       [wire] usage.record               { "model": "kimi-code", "usage": { "inputOther": 1152, "output": 8, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "session", "time": "<time>" }
       [emit] agent.status.updated       { "model": "kimi-code", "contextTokens": 80, "maxContextTokens": 256000, "contextUsage": 0.0003125, "planMode": false, "swarmMode": false, "permission": "manual", "usage": { "byModel": { "kimi-code": { "inputOther": 1152, "output": 8, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 1152, "output": 8, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
       [wire] context.apply_compaction   { "summary": "Compacted prefix.", "contextSummary": "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.\\nCompacted prefix.", "compactedCount": 4, "tokensBefore": 25, "tokensAfter": 160, "keptUserMessageCount": 3, "time": "<time>" }
@@ -1094,6 +1235,8 @@ describe('FullCompaction', () => {
       [emit] compaction.started       { "trigger": "manual" }
       [wire] context.clear            { "time": "<time>" }
       [emit] agent.status.updated     { "model": "kimi-code", "contextTokens": 0, "maxContextTokens": 256000, "contextUsage": 0, "planMode": false, "swarmMode": false, "permission": "manual" }
+      [wire] llm.tools_snapshot       { "hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "tools": [], "time": "<time>" }
+      [wire] llm.request              { "kind": "compaction", "provider": "kimi", "model": "kimi-code", "modelAlias": "kimi-code", "thinkingEffort": "off", "maxTokens": 131072, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "messageCount": 5, "droppedCount": 0, "time": "<time>" }
       [wire] usage.record             { "model": "kimi-code", "usage": { "inputOther": 1152, "output": 7, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "session", "time": "<time>" }
       [emit] agent.status.updated     { "model": "kimi-code", "contextTokens": 0, "maxContextTokens": 256000, "contextUsage": 0, "planMode": false, "swarmMode": false, "permission": "manual", "usage": { "byModel": { "kimi-code": { "inputOther": 1152, "output": 7, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 1152, "output": 7, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
       [wire] full_compaction.cancel   { "time": "<time>" }
@@ -1138,6 +1281,8 @@ describe('FullCompaction', () => {
       [wire] full_compaction.begin       { "source": "auto", "time": "<time>" }
       [emit] compaction.started          { "trigger": "auto" }
       [emit] compaction.blocked          { "turnId": 0 }
+      [wire] llm.tools_snapshot          { "hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "tools": [], "time": "<time>" }
+      [wire] llm.request                 { "kind": "compaction", "provider": "kimi", "model": "kimi-code", "modelAlias": "kimi-code", "thinkingEffort": "off", "maxTokens": 131072, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "messageCount": 8, "droppedCount": 0, "time": "<time>" }
       [wire] usage.record                { "model": "kimi-code", "usage": { "inputOther": 1173, "output": 9, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "session", "time": "<time>" }
       [emit] agent.status.updated        { "model": "kimi-code", "contextTokens": 950000, "maxContextTokens": 256000, "contextUsage": 3.7109375, "planMode": false, "swarmMode": false, "permission": "manual", "usage": { "byModel": { "kimi-code": { "inputOther": 1173, "output": 9, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 1173, "output": 9, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
       [wire] context.apply_compaction    { "summary": "Auto compacted summary.", "contextSummary": "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.\\nAuto compacted summary.", "compactedCount": 7, "tokensBefore": 46, "tokensAfter": 166, "keptUserMessageCount": 4, "time": "<time>" }
@@ -1146,6 +1291,7 @@ describe('FullCompaction', () => {
       [emit] compaction.completed        { "result": { "summary": "Auto compacted summary.", "compactedCount": 7, "tokensBefore": 46, "tokensAfter": 166, "keptUserMessageCount": 4 } }
       [wire] context.append_loop_event   { "event": { "type": "step.begin", "uuid": "<uuid-1>", "turnId": "0", "step": 1 }, "time": "<time>" }
       [emit] turn.step.started           { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
+      [wire] llm.request                 { "kind": "loop", "provider": "kimi", "model": "kimi-code", "modelAlias": "kimi-code", "thinkingEffort": "off", "maxTokens": 255834, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "messageCount": 2, "turnStep": "0.1", "time": "<time>" }
       [emit] assistant.delta             { "turnId": 0, "delta": "I can answer after compaction." }
       [wire] context.append_loop_event   { "event": { "type": "content.part", "uuid": "<uuid-2>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "part": { "type": "text", "text": "I can answer after compaction." } }, "time": "<time>" }
       [wire] context.append_loop_event   { "event": { "type": "step.end", "uuid": "<uuid-1>", "turnId": "0", "step": 1, "usage": { "inputOther": 165, "output": 11, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finishReason": "end_turn", "messageId": "mock-2" }, "time": "<time>" }
@@ -2175,6 +2321,8 @@ describe('FullCompaction', () => {
       [wire] full_compaction.begin       { "source": "auto", "time": "<time>" }
       [emit] compaction.started          { "trigger": "auto" }
       [emit] compaction.blocked          { "turnId": 0 }
+      [wire] llm.tools_snapshot          { "hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "tools": [], "time": "<time>" }
+      [wire] llm.request                 { "kind": "compaction", "provider": "kimi", "model": "mock-model", "modelAlias": "mock-model", "thinkingEffort": "off", "maxTokens": 131072, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "messageCount": 2, "droppedCount": 0, "time": "<time>" }
       [wire] usage.record                { "model": "mock-model", "usage": { "inputOther": 1135, "output": 9, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "session", "time": "<time>" }
       [emit] agent.status.updated        { "model": "mock-model", "contextTokens": 0, "maxContextTokens": 1000000, "contextUsage": 0, "planMode": false, "swarmMode": false, "permission": "manual", "usage": { "byModel": { "mock-model": { "inputOther": 1135, "output": 9, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 1135, "output": 9, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
       [wire] context.apply_compaction    { "summary": "First compacted summary.", "contextSummary": "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.\\nFirst compacted summary.", "compactedCount": 1, "tokensBefore": 8, "tokensAfter": 153, "keptUserMessageCount": 1, "time": "<time>" }
@@ -2183,6 +2331,7 @@ describe('FullCompaction', () => {
       [emit] compaction.completed        { "result": { "summary": "First compacted summary.", "compactedCount": 1, "tokensBefore": 8, "tokensAfter": 153, "keptUserMessageCount": 1 } }
       [wire] context.append_loop_event   { "event": { "type": "step.begin", "uuid": "<uuid-1>", "turnId": "0", "step": 1 }, "time": "<time>" }
       [emit] turn.step.started           { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
+      [wire] llm.request                 { "kind": "loop", "provider": "kimi", "model": "mock-model", "modelAlias": "mock-model", "thinkingEffort": "off", "maxTokens": 999847, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "messageCount": 2, "turnStep": "0.1", "time": "<time>" }
       [emit] assistant.delta             { "turnId": 0, "delta": "I need a tool." }
       [emit] tool.call.delta             { "turnId": 0, "toolCallId": "call_missing", "name": "MissingTool", "argumentsPart": "{}" }
       [wire] context.append_loop_event   { "event": { "type": "content.part", "uuid": "<uuid-2>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "part": { "type": "text", "text": "I need a tool." } }, "time": "<time>" }

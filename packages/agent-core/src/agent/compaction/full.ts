@@ -8,15 +8,21 @@ import {
   APIEmptyResponseError,
   inputTotal,
   isRetryableGenerateError,
+  type ContentPart,
   type GenerateResult,
   type Message,
   type TokenUsage,
   APIContextOverflowError,
+  APIRequestTooLargeError,
   APIStatusError,
   createUserMessage,
+  isImageFormatError,
 } from '@moonshot-ai/kosong';
 
 import type { Agent } from '..';
+import type { GenerateOptionsWithRequestLogFields } from '../llm-request-logger';
+import type { ContextMessage } from '../context/types';
+import { stripDynamicToolContext } from '../context/dynamic-tools';
 import { isAbortError } from '../../loop/errors';
 import {
   retryBackoffDelays,
@@ -36,8 +42,7 @@ import {
 import {
   applyCompletionBudget,
   resolveCompletionBudget,
-} from '../../utils/completion-budget';
-import { renderPrompt } from '../../utils/render-prompt';
+} from '../../utils/completion-budget';import { renderPrompt } from '../../utils/render-prompt';
 import compactionInstructionTemplate from './compaction-instruction.md?raw';
 import type { CompactionBeginData, CompactionResult } from './types';
 import {
@@ -218,7 +223,9 @@ export class FullCompaction {
   private estimateRequestTokens(messages: readonly Message[]): number {
     return (
       estimateTokens(this.agent.config.systemPrompt) +
-      estimateTokensForTools(this.agent.tools.loopTools) +
+      // Deferred tools never reach the outbound top-level tools[] (kosong
+      // generate() strips them); keep the estimate aligned with the wire.
+      estimateTokensForTools(this.agent.tools.loopTools.filter((t) => t.deferred !== true)) +
       estimateTokensForMessages(messages)
     );
   }
@@ -325,6 +332,14 @@ export class FullCompaction {
         this.agent.log.error('failed to refresh system prompt after compaction', { error });
       }
       await this.agent.injection.injectAfterCompaction();
+      // The reinjected reminders (loadable-tools manifest, goal) are part of
+      // the post-compaction floor: every compaction strips and re-appends
+      // them, so a baseline captured before this point would leave them
+      // outside the "nothing new since compaction" guard — with a large
+      // manifest checkAutoCompaction would re-trigger against a shape that
+      // cannot shrink. Raise the guard to the true floor before deferred
+      // input replays (markCompleted), so only genuinely new content counts.
+      this.lastCompactedTokenCount = this.tokenCountWithPending;
       this.markCompleted();
       const { contextSummary: _contextSummary, ...eventResult } = result;
       void _contextSummary;
@@ -407,8 +422,18 @@ export class FullCompaction {
       // Compact the whole history, trimming old messages only when the
       // summarizer request itself cannot fit. Any trimmed messages are not
       // covered by the produced summary; `droppedCount` reports that blind spot.
-      let historyForModel = originalHistory;
+      // Dynamic-tool protocol context (schema messages, loadable-tools
+      // announcements) is excluded from the summarizer input entirely: it is
+      // protocol state, not conversation — summarizing it wastes tokens and
+      // risks schema text leaking into the summary. The post-compaction
+      // boundary re-announces the manifest; the schemas themselves are
+      // deliberately dropped (discard-on-compaction) and re-selectable on
+      // demand. Must happen before project() (which strips the origin
+      // anchor). `originalHistory` itself stays untouched for the
+      // prefix-race check and `compactedCount`.
+      let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(originalHistory);
       let droppedCount = 0;
+      let mediaStripAttempted = false;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
       while (true) {
@@ -425,13 +450,17 @@ export class FullCompaction {
         ];
         const estimatedCompactionRequestTokens = this.estimateRequestTokens(messages);
         try {
+          const generateOptions: GenerateOptionsWithRequestLogFields = {
+            signal,
+            requestLogFields: { kind: 'compaction', droppedCount },
+          };
           const response = await this.agent.generate(
             provider,
             this.agent.config.systemPrompt,
             [...this.agent.tools.loopTools],
             messages,
             undefined,
-            { signal },
+            generateOptions,
           );
           if (response.finishReason === 'truncated') {
             throw new CompactionTruncatedError();
@@ -440,6 +469,28 @@ export class FullCompaction {
           summary = extractCompactionSummary(response);
           break;
         } catch (error) {
+          // A request-body-size rejection (HTTP 413) or an image-format
+          // rejection is first retried with media parts replaced by text
+          // markers: accumulated base64 payloads are the usual 413 culprit,
+          // a poisoned image the format-rejection culprit, and a text summary
+          // needs neither — the conversation already narrates what was seen,
+          // and the ReadMediaFile `<image path="...">` text wrapper survives.
+          // Only the summarizer input copy is rewritten; the real history
+          // keeps its media. A rejection after the strip (or with no media to
+          // strip) falls through to the overflow shrink below for a 413, and
+          // propagates for a format error — dropping oldest messages cannot
+          // fix a poisoned image's format.
+          const mediaRejected =
+            error instanceof APIRequestTooLargeError || isImageFormatError(error);
+          if (mediaRejected && !mediaStripAttempted) {
+            mediaStripAttempted = true;
+            const stripped = replaceMediaPartsWithMarkers(historyForModel);
+            if (stripped !== historyForModel) {
+              historyForModel = stripped;
+              retryCount = 0;
+              continue;
+            }
+          }
           const isContextOverflow = this.shouldRecoverFromContextOverflow(
             error,
             estimatedCompactionRequestTokens,
@@ -447,7 +498,9 @@ export class FullCompaction {
           if (isContextOverflow) {
             this.observeContextOverflow(estimatedCompactionRequestTokens);
           }
-          if (isContextOverflow && historyForModel.length > 1) {
+          const shouldShrinkAfterOverflow =
+            isContextOverflow || error instanceof APIRequestTooLargeError;
+          if (shouldShrinkAfterOverflow && historyForModel.length > 1) {
             overflowShrinkCount += 1;
             if (overflowShrinkCount > MAX_COMPACTION_OVERFLOW_SHRINK_ATTEMPTS) {
               throw error;
@@ -525,6 +578,14 @@ export class FullCompaction {
         tokensBefore,
         droppedCount: droppedCount === 0 ? undefined : droppedCount,
       });
+      // Loaded dynamic tool schemas are deliberately NOT rebuilt: compaction
+      // discards the loaded set entirely (the boundary announcement re-lists
+      // every loadable name, and the model re-selects what it still needs).
+      // Everything downstream already treats the empty loaded set as its
+      // consistent base state — the ledger scan finds no schema messages, the
+      // pending set was cleared by applyCompaction, deferred extras drop out
+      // of the executable table, and a from-memory call is rejected by
+      // preflight with select guidance.
 
       // Telemetry keys are snake_case, but the `context.apply_compaction`
       // record written below keeps its persisted camelCase field names
@@ -544,7 +605,12 @@ export class FullCompaction {
           ? {}
           : { input_tokens: inputTotal(usage), output_tokens: usage.output }),
       });
-      this.lastCompactedTokenCount = result.tokensAfter;
+      // Baseline the "nothing new since compaction" guard on the live counter
+      // (== result.tokensAfter here, since nothing has been appended since
+      // applyCompaction). compactionWorker raises it once more after
+      // injectAfterCompaction so the reinjected reminders join the floor;
+      // this earlier capture stays as the fallback when reinjection throws.
+      this.lastCompactedTokenCount = this.tokenCountWithPending;
       return result;
     } catch (error) {
       if (isAbortError(error)) return undefined;
@@ -557,7 +623,12 @@ export class FullCompaction {
         thinking_effort: this.agent.config.thinkingEffort,
         error_type: error instanceof Error ? error.name : 'Unknown',
       });
-      if (isKimiError(error) && error.code === ErrorCodes.AUTH_LOGIN_REQUIRED) throw error;
+      if (
+        isKimiError(error) &&
+        (error.code === ErrorCodes.AUTH_LOGIN_REQUIRED ||
+          error.code === ErrorCodes.PROVIDER_AUTH_ERROR)
+      )
+        throw error;
       throw new KimiError(ErrorCodes.COMPACTION_FAILED, String(error), { cause: error });
     }
   }
@@ -595,6 +666,40 @@ export class FullCompaction {
 
 const MAX_COMPACTION_OVERFLOW_SHRINK_ATTEMPTS = 3;
 const COMPACTION_OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
+
+const MEDIA_PART_MARKERS = {
+  image_url: '[image]',
+  audio_url: '[audio]',
+  video_url: '[video]',
+} as const;
+
+function isMediaPart(part: ContentPart): part is ContentPart & { type: keyof typeof MEDIA_PART_MARKERS } {
+  return part.type in MEDIA_PART_MARKERS;
+}
+
+/**
+ * Replace media parts (image/audio/video) with text markers in the summarizer
+ * input, for the 413 strip-and-retry above. Messages without media are
+ * returned by reference (keeping the per-message token-estimate cache warm),
+ * and when nothing changed the input array itself is returned so the caller
+ * can tell there was no media to strip.
+ */
+function replaceMediaPartsWithMarkers(
+  messages: readonly ContextMessage[],
+): readonly ContextMessage[] {
+  let changed = false;
+  const out = messages.map((message) => {
+    if (!message.content.some(isMediaPart)) return message;
+    changed = true;
+    return {
+      ...message,
+      content: message.content.map((part): ContentPart =>
+        isMediaPart(part) ? { type: 'text', text: MEDIA_PART_MARKERS[part.type] } : part,
+      ),
+    };
+  });
+  return changed ? out : messages;
+}
 
 function shrinkCompactionHistoryAfterOverflow<T extends Message>(
   messages: readonly T[],

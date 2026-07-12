@@ -1,6 +1,7 @@
 import type { ContentPart, Message, TextPart } from '@moonshot-ai/kosong';
 
 import { ErrorCodes, KimiError } from '../../errors';
+import { renderToolResultForModel } from './tool-result-render';
 import type { ContextMessage } from './types';
 
 export interface ProjectOptions {
@@ -359,26 +360,34 @@ function prepareMessageForProjection(
 ): ContextMessage | null {
   if (message.partial === true) return null;
 
+  // Tool results are stored as facts (raw output + structured isError/note).
+  // Render the model-visible form — error status prefix, empty-output
+  // placeholder, trailing note — exactly here, at the projection boundary.
+  const source =
+    message.role === 'tool'
+      ? { ...message, content: renderToolResultForModel({ output: message.content, note: message.note, isError: message.isError }) }
+      : message;
+
   let content: ContentPart[] | undefined;
-  for (const [index, part] of message.content.entries()) {
+  for (const [index, part] of source.content.entries()) {
     // Strict providers reject a text block that is empty OR whitespace-only
     // ("text content blocks must contain non-whitespace text"). Drop both; a
     // block with surrounding whitespace but real content is kept verbatim.
     if (part.type === 'text' && part.text.trim().length === 0) {
-      content ??= message.content.slice(0, index);
+      content ??= source.content.slice(0, index);
       // Report only whitespace-only (non-empty) blocks: a truly empty `''` block
       // is routine cleanup (e.g. a trailing empty text part after a tool call),
       // whereas a block that is non-empty yet all-whitespace signals something
       // upstream fed blank content and is worth surfacing for debugging.
       if (part.text.length > 0) {
-        onAnomaly?.({ kind: 'whitespace_text_dropped', role: message.role });
+        onAnomaly?.({ kind: 'whitespace_text_dropped', role: source.role });
       }
       continue;
     }
     content?.push(part);
   }
 
-  const next = content === undefined ? message : { ...message, content };
+  const next = content === undefined ? source : { ...source, content };
   if (next.role === 'tool' && next.content.length === 0) {
     throw new KimiError(
       ErrorCodes.REQUEST_INVALID,
@@ -390,6 +399,10 @@ function prepareMessageForProjection(
       },
     );
   }
+  // A message that loads tool definitions (`tools` present) is intentionally
+  // content-free — it must survive the empty-message cleanup or the loaded
+  // schemas silently vanish from every outgoing request.
+  if (next.tools !== undefined && next.tools.length > 0) return next;
   return next.content.length === 0 && next.toolCalls.length === 0 ? null : next;
 }
 
@@ -429,6 +442,7 @@ function stripContextMetadata(message: ContextMessage): Message {
     toolCalls: message.toolCalls.map((tc) => ({ ...tc })),
     toolCallId: message.toolCallId,
     partial: message.partial,
+    tools: message.tools?.map((tool) => ({ ...tool })),
   };
 }
 
@@ -450,4 +464,79 @@ export function trimTrailingOpenToolExchange(history: readonly Message[]): Messa
   );
   const closed = assistant.toolCalls.every((toolCall) => trailingToolCallIds.has(toolCall.id));
   return closed ? [...history] : history.slice(0, lastNonToolIndex);
+}
+
+/**
+ * How many of the most recent media parts survive the media-degraded
+ * projection. The tail images are what the model is actively working from
+ * (the screenshot it just took); everything older is replaced by a marker.
+ */
+export const MEDIA_DEGRADE_KEEP_RECENT = 2;
+
+const MEDIA_DEGRADED_PLACEHOLDERS = {
+  image_url:
+    '[image omitted: dropped to fit the provider request size limit; re-read the file to view it]',
+  audio_url:
+    '[audio omitted: dropped to fit the provider request size limit; re-read the file to hear it]',
+  video_url:
+    '[video omitted: dropped to fit the provider request size limit; re-read the file to view it]',
+} as const;
+
+/**
+ * Markers for the media-stripped resend after the provider rejected an
+ * image's FORMAT (not its size): the image marker points the model at
+ * re-reading the file, whose refusal carries per-OS conversion instructions;
+ * audio/video are collateral of the full strip and say so.
+ */
+export const MEDIA_STRIPPED_PLACEHOLDERS = {
+  image_url:
+    '[image omitted: the provider rejected this image; re-read the file for conversion instructions]',
+  audio_url:
+    '[audio omitted: dropped along with a rejected image; re-read the file to hear it]',
+  video_url:
+    '[video omitted: dropped along with a rejected image; re-read the file to view it]',
+} as const;
+
+type MediaPlaceholderSet = typeof MEDIA_DEGRADED_PLACEHOLDERS | typeof MEDIA_STRIPPED_PLACEHOLDERS;
+
+function isDegradableMediaPart(
+  part: ContentPart,
+): part is ContentPart & { type: keyof MediaPlaceholderSet } {
+  return part.type in MEDIA_DEGRADED_PLACEHOLDERS;
+}
+
+/**
+ * Replace all but the `keepRecent` most recent media parts with deterministic
+ * text markers. This is the media-degraded projection used to resend a request
+ * the provider rejected as too large (HTTP 413 on accumulated base64 media)
+ * and — with `keepRecent = 0` and `MEDIA_STRIPPED_PLACEHOLDERS` — the resend
+ * after an image-format rejection, where the poisoned image could be anywhere
+ * and only a full strip guarantees a clean request. A purely read-side
+ * transform — the underlying history is left untouched — that trades pixels
+ * for deliverability while the surrounding text (including ReadMediaFile's
+ * `<image path="...">` wrapper) survives, so the model can re-read any file
+ * it still needs. Untouched messages are returned by reference, and when
+ * nothing needs degrading the input array itself is returned.
+ */
+export function degradeOlderMediaParts(
+  messages: readonly Message[],
+  keepRecent: number,
+  placeholders: MediaPlaceholderSet = MEDIA_DEGRADED_PLACEHOLDERS,
+): Message[] {
+  const mediaCount = messages.reduce(
+    (count, message) => count + message.content.filter(isDegradableMediaPart).length,
+    0,
+  );
+  let toDegrade = Math.max(0, mediaCount - keepRecent);
+  if (toDegrade === 0) return messages as Message[];
+
+  return messages.map((message) => {
+    if (toDegrade === 0 || !message.content.some(isDegradableMediaPart)) return message;
+    const content = message.content.map((part): ContentPart => {
+      if (toDegrade === 0 || !isDegradableMediaPart(part)) return part;
+      toDegrade -= 1;
+      return { type: 'text', text: placeholders[part.type] };
+    });
+    return { ...message, content };
+  });
 }

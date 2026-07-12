@@ -7,6 +7,7 @@ import { PluginManager } from '#/plugin';
 import { LocalFetchURLProvider } from '#/tools/providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from '#/tools/providers/moonshot-fetch-url';
 import { MoonshotWebSearchProvider } from '#/tools/providers/moonshot-web-search';
+import { ImageLimits } from '#/tools/support/image-limits';
 import type { PromisableMethods } from '#/utils/types';
 import { getCoreVersion } from '#/version';
 import { resolveThinkingEffort } from '../agent/config/thinking';
@@ -35,6 +36,12 @@ import type { Logger } from '../logging/types';
 import { resolveSessionMcpConfig, mergeCallerMcpServers, type SessionMcpConfig } from '../mcp';
 import { Session, type SessionMeta, type SessionSkillConfig } from '../session';
 import { exportSessionDirectory } from '../session/export';
+import {
+  registerBuiltinSkills,
+  SessionSkillRegistry,
+  resolveSkillRoots,
+  summarizeSkill,
+} from '../skill';
 import {
   ProviderManager, type BearerTokenProvider,
   type OAuthTokenProviderResolver
@@ -76,10 +83,12 @@ import type {
   ForkSessionPayload,
   GetBackgroundOutputPayload,
   GetBackgroundPayload,
+  GetCronTasksResult,
   GetKimiConfigPayload,
   GetPluginInfoPayload,
   InstallPluginPayload,
   ListSessionsPayload,
+  ListWorkspaceSkillsPayload,
   McpServerInfo,
   McpStartupMetrics,
   PluginInfo,
@@ -161,6 +170,8 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   private pluginsLoadError: Error | undefined;
   private readonly appVersion: string | undefined;
   private readonly experimentalFlags: FlagResolver;
+  /** Owner-scoped [image] limits; reload pushes the new config via setConfig. */
+  readonly imageLimits: ImageLimits;
 
   constructor(
     protected readonly rpcClient: CoreRPCClient,
@@ -198,6 +209,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       FLAG_DEFINITIONS,
       this.config.experimental,
     );
+    this.imageLimits = new ImageLimits(process.env, this.config.image);
     this.sessionStore = new SessionStore(this.homeDir);
     this.plugins = new PluginManager({ kimiHomeDir: this.homeDir });
     // Capture the error rather than swallow it: mutators and explicit /plugins
@@ -291,17 +303,20 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       skills: this.resolveSessionSkillConfig(config),
       mcpConfig,
       experimentalFlags: this.experimentalFlags,
+      imageLimits: this.imageLimits,
       telemetry: sessionTelemetry,
       pluginSessionStarts,
       pluginCommands,
       appVersion: this.appVersion,
       additionalDirs,
+      drainAgentTasksOnStop: options.drainAgentTasksOnStop,
     });
     try {
       session.metadata = {
         ...session.metadata,
         createdAt: new Date(summary.createdAt).toISOString(),
         updatedAt: new Date(summary.updatedAt).toISOString(),
+        workDir,
         ...(summary.title !== undefined
           ? {
               title: summary.title,
@@ -424,6 +439,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       skills: this.resolveSessionSkillConfig(config),
       mcpConfig,
       experimentalFlags: this.experimentalFlags,
+      imageLimits: this.imageLimits,
       telemetry: withTelemetryContext(this.telemetry, { sessionId: summary.id }),
       initializeMainAgent: false,
       pluginSessionStarts,
@@ -755,6 +771,37 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     return this.sessionApi(sessionId).listSkills(payload);
   }
 
+  /**
+   * List the skills available for a workspace working directory without
+   * requiring a session. Mirrors `Session.loadSkills` exactly (same roots,
+   * same discovery order, same built-ins) so the result matches what a new
+   * session created in `workDir` would see. Used to populate the composer
+   * skill menu before a session exists.
+   */
+  async listWorkspaceSkills({
+    workDir,
+  }: ListWorkspaceSkillsPayload): Promise<readonly SkillSummary[]> {
+    const cwd = requiredWorkDir('listWorkspaceSkills', workDir);
+    await this.pluginsReady;
+    const skills = this.resolveSessionSkillConfig(this.reloadProviderManager());
+    const roots = await resolveSkillRoots({
+      paths: {
+        userHomeDir: skills.userHomeDir ?? this.userHomeDir,
+        brandHomeDir: skills.brandHomeDir ?? this.homeDir,
+        workDir: cwd,
+      },
+      explicitDirs: skills.explicitDirs,
+      extraDirs: skills.extraDirs,
+      pluginSkillRoots: skills.pluginSkillRoots,
+      mergeAllAvailableSkills: skills.mergeAllAvailableSkills,
+      builtinDir: skills.builtinDir,
+    });
+    const registry = new SessionSkillRegistry({});
+    await registry.loadRoots(roots);
+    registerBuiltinSkills(registry);
+    return registry.listSkills().map(summarizeSkill);
+  }
+
   listPluginCommands({
     sessionId,
     ...payload
@@ -793,6 +840,10 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
 
   waitForBackgroundTasksOnPrint({ sessionId, ...payload }: SessionScopedPayload<EmptyPayload>): Promise<void> {
     return this.sessionApi(sessionId).waitForBackgroundTasksOnPrint(payload);
+  }
+
+  handlePrintMainTurnCompleted({ sessionId, ...payload }: SessionScopedPayload<EmptyPayload>): Promise<'finish' | 'continue'> {
+    return this.sessionApi(sessionId).handlePrintMainTurnCompleted(payload);
   }
 
   addAdditionalDir({
@@ -836,6 +887,13 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     ...payload
   }: SessionAgentPayload<EmptyPayload>): Promise<GoalSnapshot> {
     return Promise.resolve(this.sessionApi(sessionId).cancelGoal(payload));
+  }
+
+  getCronTasks({
+    sessionId,
+    ...payload
+  }: SessionAgentPayload<EmptyPayload>): Promise<GetCronTasksResult> {
+    return Promise.resolve(this.sessionApi(sessionId).getCronTasks(payload));
   }
 
   async installPlugin(payload: InstallPluginPayload): Promise<PluginSummary> {
@@ -1039,6 +1097,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   private setRuntimeConfig(config: KimiConfig): KimiConfig {
     this.config = config;
     this.experimentalFlags.setConfigOverrides(config.experimental);
+    this.imageLimits.setConfig(config.image);
     return this.config;
   }
 

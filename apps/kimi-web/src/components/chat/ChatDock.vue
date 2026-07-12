@@ -20,6 +20,10 @@ import Pill from '../ui/Pill.vue';
 const props = defineProps<{
   sessionId?: string;
   running?: boolean;
+  /** True while the empty-composer first prompt is being created + submitted.
+   *  Covers the gap where draft-session creation already selected the new
+   *  session (empty state → dock) before the first prompt is submitted. */
+  starting?: boolean;
   queued?: QueuedPromptView[];
   searchFiles?: (q: string) => Promise<FileItem[]>;
   uploadImage?: (file: Blob, name?: string) => Promise<{ fileId: string; name: string; mediaType: string } | null>;
@@ -80,12 +84,25 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const composerRef = ref<{ loadForEdit: (value: string) => void; focus: () => void } | null>(null);
+const composerRef = ref<{
+  loadForEdit: (value: string) => boolean;
+  loadAttachmentsForEdit: (atts: { fileId?: string; kind: 'image' | 'video'; url: string; name?: string }[]) => void;
+  focus: () => void;
+} | null>(null);
 const workPanelRef = ref<HTMLElement | null>(null);
 const workbarRef = ref<HTMLElement | null>(null);
 
-function loadForEdit(value: string): void {
-  composerRef.value?.loadForEdit(value);
+function loadForEdit(value: string): boolean {
+  // The nested Composer is only rendered in ChatDock's v-else — when a pending
+  // question or approval is shown it is unmounted, so report unavailability so
+  // the caller doesn't dequeue a prompt it can't actually load.
+  if (!composerRef.value) return false;
+  composerRef.value.loadForEdit(value);
+  return true;
+}
+
+function loadAttachmentsForEdit(atts: { fileId?: string; kind: 'image' | 'video'; url: string; name?: string }[]): void {
+  composerRef.value?.loadAttachmentsForEdit(atts);
 }
 
 function focus(): void {
@@ -117,7 +134,7 @@ onUnmounted(() => {
   }
 });
 
-defineExpose({ loadForEdit, focus });
+defineExpose({ loadForEdit, loadAttachmentsForEdit, focus });
 </script>
 
 <template>
@@ -238,10 +255,12 @@ defineExpose({ loadForEdit, focus });
       :plan-mode="planMode"
       :swarm-mode="swarmMode"
       :goal-mode="goalMode"
+      :goal="goal"
       :activation-badges="activationBadges"
       :models="models"
       :starred-ids="starredIds"
       :skills="skills"
+      :starting="starting"
       @submit="emit('submit', $event)"
       @steer="emit('steer', $event)"
       @command="emit('command', $event)"

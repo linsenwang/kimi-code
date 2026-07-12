@@ -23,9 +23,23 @@ export interface ToolCallDelta {
   readonly argumentsPart?: string | undefined;
 }
 
+/**
+ * Request-scoped side channel from the host layers (loop, LLM adapter,
+ * compaction) down to the `Agent.generate` choke point, consumed there by the
+ * diagnostic logger and the wire-record request trace.
+ */
 export interface LLMRequestLogFields {
-  readonly turnStep: string;
+  readonly turnStep?: string;
   readonly attempt?: string;
+  /** Request purpose; absent means a regular loop step. */
+  readonly kind?: 'loop' | 'compaction';
+  /** Set when the messages are a fallback resend projection: the strict
+   * wire-compliant rebuild, the media-degraded rebuild after a
+   * request-too-large rejection, or the media-stripped rebuild after an
+   * image-format rejection. */
+  readonly projection?: 'strict' | 'media-degraded' | 'media-stripped';
+  /** Compaction only: messages dropped so far by overflow/empty shrinking. */
+  readonly droppedCount?: number;
 }
 
 export interface LLMStreamTiming {

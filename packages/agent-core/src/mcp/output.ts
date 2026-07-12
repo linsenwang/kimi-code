@@ -14,7 +14,9 @@
  *     would silently reintroduce the very degradation the caption reports.
  *  4. Compress oversized inline images, announcing each compression with a
  *     caption (original vs. sent size, readback path to the persisted
- *     original) so downsampling is never silent.
+ *     original) so downsampling is never silent. The captions come back
+ *     from the compressor as data and ride the result's `note` side
+ *     channel — rendered to the model at projection time, never to UIs.
  *  5. Apply the per-part 10 MB binary cap: oversized binary parts
  *     (image/audio/video URLs) collapse to a notice, so a single
  *     screenshot cannot evict every text part.
@@ -27,7 +29,13 @@
 
 import type { ContentPart } from '@moonshot-ai/kosong';
 
+import type { TelemetryClient } from '#/telemetry';
+
 import { compressImageContentParts } from '../tools/support/image-compress';
+import {
+  buildUnsupportedImageNotice,
+  isModelAcceptedImageMime,
+} from '../tools/support/image-format-policy';
 import { persistOriginalImage } from '../tools/support/image-originals';
 import type { MCPContentBlock, MCPToolResult } from './types';
 
@@ -38,6 +46,10 @@ export interface McpOutputOptions {
    * Falls back to the shared temp-dir cache when absent.
    */
   readonly originalsDir?: string | undefined;
+  /** Report an `image_compress` event per compressed tool-result image. */
+  readonly telemetry?: TelemetryClient | undefined;
+  /** Owner-resolved longest-edge ceiling (px) for tool-result images. */
+  readonly maxImageEdgePx?: number | undefined;
 }
 
 // MCP servers can produce arbitrarily large outputs; cap what we feed back to
@@ -125,6 +137,15 @@ export function convertMCPContentBlock(block: MCPContentBlock): ContentPart | nu
   if (block.type === 'resource_link' && typeof block.uri === 'string') {
     const mimeType = block.mimeType ?? 'application/octet-stream';
     if (mimeType.startsWith('image/')) {
+      // The declared MIME is the only format signal for a remote image: an
+      // extensionless or signed URL gives the extension gate nothing to work
+      // with, and the provider fetches it server-side. When the server
+      // honestly declares a format providers reject (e.g. an image search
+      // tool returning AVIF links), drop the image for a notice that keeps
+      // the URL — the model can still fetch and convert it.
+      if (!isModelAcceptedImageMime(mimeType)) {
+        return { type: 'text', text: buildUnsupportedImageNotice(mimeType, block.uri) };
+      }
       return { type: 'image_url', imageUrl: { url: block.uri } };
     }
     if (mimeType.startsWith('audio/')) {
@@ -151,7 +172,12 @@ export async function mcpResultToExecutableOutput(
   result: MCPToolResult,
   qualifiedToolName: string,
   options: McpOutputOptions = {},
-): Promise<{ output: string | ContentPart[]; isError: boolean; truncated?: true }> {
+): Promise<{
+  output: string | ContentPart[];
+  isError: boolean;
+  note?: string;
+  truncated?: true;
+}> {
   const converted: ContentPart[] = [];
   for (const block of result.content) {
     const part = convertMCPContentBlock(block);
@@ -161,19 +187,27 @@ export async function mcpResultToExecutableOutput(
   }
 
   const wrapped = wrapMediaOnly(converted, qualifiedToolName);
-  // Text budget FIRST, on the tool's own text only: captions inserted by the
-  // compression step below must never compete with a chatty tool's text for
-  // the budget — an evicted or mid-string-sliced caption silently
-  // reintroduces the downsampling this pipeline promises to announce.
+  // Text budget FIRST, on the tool's own text only: captions produced by the
+  // compression step below ride the `note` side channel and never compete
+  // with a chatty tool's text for the budget — an evicted or mid-string-
+  // sliced caption would silently reintroduce the downsampling this pipeline
+  // promises to announce.
   const budgeted = applyTextBudget(wrapped);
   // Shrink oversized images BEFORE the per-part byte cap, so a large but
   // compressible screenshot is downsampled and kept rather than dropped to a
-  // text notice. Compression is never silent: each re-encoded image gains a
+  // text notice. Compression is never silent: each re-encoded image yields a
   // caption stating what the original was, and the original bytes are
   // persisted (best effort, into the session's media-originals dir when
   // known) so the model can read detail back via ReadMediaFile + region.
-  // Parts that cannot be compressed pass through.
+  // Parts that cannot be compressed pass through. The captions come back as
+  // DATA (never inserted into the parts), so tool output that merely quotes
+  // a caption can never be mistaken for a generated one.
   const compressed = await compressImageContentParts(budgeted.parts, {
+    maxEdge: options.maxImageEdgePx,
+    telemetry:
+      options.telemetry === undefined
+        ? undefined
+        : { client: options.telemetry, source: 'mcp_tool_result' },
     annotate: {
       persistOriginal: (bytes, mimeType) =>
         persistOriginalImage(
@@ -183,12 +217,15 @@ export async function mcpResultToExecutableOutput(
         ),
     },
   });
-  const capped = applyBinaryPartCap(compressed);
+  const capped = applyBinaryPartCap(compressed.parts);
   const truncated = budgeted.truncated || capped.truncated;
   const output = collapseSingleText(capped.parts);
-  return truncated
-    ? { output, isError: result.isError, truncated: true }
-    : { output, isError: result.isError };
+  return {
+    output,
+    isError: result.isError,
+    note: compressed.captions.length > 0 ? compressed.captions.join('\n') : undefined,
+    truncated: truncated ? true : undefined,
+  };
 }
 
 /**

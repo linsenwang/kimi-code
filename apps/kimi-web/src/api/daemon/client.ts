@@ -98,6 +98,7 @@ interface WireMeta {
   started_at: string;
   capabilities: Record<string, boolean>;
   open_in_apps?: string[];
+  dangerous_bypass_auth?: boolean;
 }
 
 interface WireAbortResult {
@@ -270,6 +271,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
     startedAt: string;
     capabilities: Record<string, boolean>;
     openInApps: string[];
+    dangerousBypassAuth: boolean;
   }> {
     const data = await this.http.get<WireMeta>('/meta');
     return {
@@ -278,6 +280,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
       startedAt: data.started_at,
       capabilities: data.capabilities,
       openInApps: Array.isArray(data.open_in_apps) ? data.open_in_apps : [],
+      dangerousBypassAuth: data.dangerous_bypass_auth === true,
     };
   }
 
@@ -290,6 +293,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
       status?: AppSessionStatus;
       workspaceId?: string;
       includeArchive?: boolean;
+      archivedOnly?: boolean;
       excludeEmpty?: boolean;
     },
   ): Promise<Page<AppSession>> {
@@ -299,6 +303,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
       page_size: input?.pageSize,
       status: input?.status ? toWireSessionStatus(input.status) : undefined,
       include_archive: input?.includeArchive,
+      archived_only: input?.archivedOnly,
       exclude_empty: input?.excludeEmpty,
       // PRESUMED — daemon supports ?workspace_id= once the registry ships; it
       // ignores unknown query params until then, so this is safe to always send.
@@ -415,6 +420,16 @@ export class DaemonKimiWebApi implements KimiWebApi {
       {},
     );
     return data;
+  }
+
+  // POST /sessions/{id}:restore — clear the archived flag. The daemon returns
+  // the full restored session, so callers can merge it straight back into lists.
+  async restoreSession(sessionId: string): Promise<AppSession> {
+    const data = await this.http.post<WireSession>(
+      `/sessions/${encodeURIComponent(sessionId)}:restore`,
+      {},
+    );
+    return toAppSession(data);
   }
 
   // -------------------------------------------------------------------------
@@ -714,14 +729,26 @@ export class DaemonKimiWebApi implements KimiWebApi {
   }
 
   // -------------------------------------------------------------------------
-  // Skills — session-scoped slash-invocable skills
+  // Skills — slash-invocable skills (session- or workspace-scoped)
   // GET  /sessions/{id}/skills              → { skills: WireSkillDescriptor[] }
+  // GET  /workspaces/{id}/skills            → { skills: WireSkillDescriptor[] } (no session)
   // POST /sessions/{id}/skills/{name}:activate body { args? } → { activated, skill_name }
   // -------------------------------------------------------------------------
 
   async listSkills(sessionId: string): Promise<AppSkill[]> {
     const data = await this.http.get<{ skills: WireSkillDescriptor[] }>(
       `/sessions/${encodeURIComponent(sessionId)}/skills`,
+    );
+    return (data.skills ?? []).map((s) => ({
+      name: s.name,
+      description: s.description,
+      source: s.source,
+    }));
+  }
+
+  async listSkillsForWorkspace(workspaceId: string): Promise<AppSkill[]> {
+    const data = await this.http.get<{ skills: WireSkillDescriptor[] }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/skills`,
     );
     return (data.skills ?? []).map((s) => ({
       name: s.name,
@@ -1328,11 +1355,12 @@ export class DaemonKimiWebApi implements KimiWebApi {
       },
       seedSnapshot(sessionId: string, snapshot: AppSessionSnapshot): void {
         // Rebuild the projector's mid-turn state from the snapshot. The
-        // resulting AppEvents (running status + partially-streamed assistant
-        // message) flow through the SAME onEvent path as live events, so the
-        // rendering layer needs no special handling. When there is no
-        // in-flight turn we only reset, so stale turn state can't leak into
-        // the freshly-loaded message list.
+        // resulting AppEvent (the partially-streamed assistant message) flows
+        // through the SAME onEvent path as live events, so the rendering layer
+        // needs no special handling; session status comes from the snapshot's
+        // authoritative session record. When there is no in-flight turn we
+        // only reset, so stale turn state can't leak into the freshly-loaded
+        // message list.
         if (snapshot.inFlightTurn === null) {
           projector.reset(sessionId);
           return;
@@ -1369,6 +1397,12 @@ export class DaemonKimiWebApi implements KimiWebApi {
       },
       markSideChannelAgent(agentId: string): void {
         projector.markSideChannelAgent(agentId);
+      },
+      health(): { connected: boolean; open: boolean; stale: boolean } {
+        return socket.health();
+      },
+      reconnect(): void {
+        socket.reconnect();
       },
       close(): void {
         socket.close();

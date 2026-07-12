@@ -14,6 +14,7 @@ import type { PluginCommandOrigin } from './context';
 
 import type { McpConnectionManager } from '../mcp';
 import { FlagResolver, type ExperimentalFlagResolver } from '../flags';
+import { ImageLimits } from '../tools/support/image-limits';
 import {
   prepareSystemPromptContext,
   type PreparedSystemPromptContext,
@@ -55,6 +56,7 @@ import { TurnFlow } from './turn';
 import { KosongLLM } from './turn/kosong-llm';
 import { UsageRecorder } from './usage';
 import { LlmRequestLogger, splitGenerateOptions } from './llm-request-logger';
+import { LlmRequestRecorder } from './llm-request-recorder';
 import { resolveCompletionBudget } from '../utils/completion-budget';
 import type { Kaos } from '@moonshot-ai/kaos';
 import type { ToolServices } from '../tools/support/services';
@@ -95,6 +97,8 @@ export interface AgentOptions {
   readonly pluginSessionStarts?: readonly EnabledPluginSessionStart[];
   readonly pluginCommands?: readonly PluginCommandDef[];
   readonly experimentalFlags?: ExperimentalFlagResolver;
+  /** Owner-scoped [image] limits; a standalone Agent gets env/built-in defaults. */
+  readonly imageLimits?: ImageLimits;
   readonly replay?: ReplayBuilderOptions;
   readonly additionalDirs?: readonly string[];
   readonly systemPromptContextProvider?: (() => Promise<PreparedSystemPromptContext>) | undefined;
@@ -123,8 +127,10 @@ export class Agent {
   readonly log: Logger;
   readonly telemetry: TelemetryClient;
   readonly experimentalFlags: ExperimentalFlagResolver;
+  readonly imageLimits: ImageLimits;
 
   readonly llmRequestLogger: LlmRequestLogger;
+  readonly llmRequestRecorder: LlmRequestRecorder;
   readonly blobStore: BlobStore | undefined;
   readonly records: AgentRecords;
   readonly fullCompaction: FullCompaction;
@@ -143,6 +149,15 @@ export class Agent {
   readonly cron: CronManager | null;
   readonly goal: GoalMode;
   readonly replayBuilder: ReplayBuilder;
+
+  /**
+   * Print-mode (`kimi -p`) only: when true and the agent ends a turn while
+   * background subagents (`kind === 'agent'`) are still running, the turn loop
+   * holds the turn open and idle-waits until they finish, flushing their
+   * completions into the turn so the model can react before the run exits. Set
+   * by the session for print runs; defaults to false everywhere else.
+   */
+  printDrainAgentTasksOnStop = false;
 
   private additionalDirs: readonly string[];
   private activeProfile?: ResolvedAgentProfile;
@@ -167,10 +182,12 @@ export class Agent {
     this.log = options.log ?? log;
     this.telemetry = options.telemetry ?? noopTelemetryClient;
     this.experimentalFlags = options.experimentalFlags ?? new FlagResolver();
+    this.imageLimits = options.imageLimits ?? new ImageLimits();
     this.additionalDirs = normalizeAdditionalDirs(options.additionalDirs ?? []);
     this.systemPromptContextProvider = options.systemPromptContextProvider;
 
     this.llmRequestLogger = new LlmRequestLogger(this.log);
+    this.llmRequestRecorder = new LlmRequestRecorder(this);
     this.blobStore = options.homedir
       ? new BlobStore({ blobsDir: join(options.homedir, 'blobs') })
       : undefined;
@@ -222,19 +239,52 @@ export class Agent {
     }
   }
 
+  /**
+   * Single decision point for select_tools progressive disclosure. All three
+   * gates must be open: the model has the `dynamically_loaded_tools`
+   * capability (message-level tool declarations), the model declares
+   * `tool_use` (a model without tool use loading tools dynamically is a
+   * contradiction), and the `tool-select` experimental flag is on. Every
+   * consumer — top-level tools[] convergence, select_tools registration,
+   * manifest announcements, projection shaping — reads this instead of
+   * re-deriving the conditions, so degradation is lossless: any closed gate
+   * reproduces the inline behavior byte-for-byte.
+   */
+  get toolSelectEnabled(): boolean {
+    const capability = this.config.modelCapabilities;
+    return (
+      capability.dynamically_loaded_tools === true &&
+      capability.tool_use &&
+      this.experimentalFlags.enabled('tool-select')
+    );
+  }
+
   get generate(): typeof generate {
     return async (provider, systemPrompt, tools, history, callbacks, options) => {
       const { requestLogFields, generateOptions } = splitGenerateOptions(options);
       const modelAlias = this.config.modelAlias;
       const run = (requestOptions: Parameters<typeof generate>[5]) => {
-        this.llmRequestLogger.logRequest({
-          provider,
-          modelAlias,
-          systemPrompt,
-          tools,
-          messages: history,
-          fields: requestLogFields,
-        });
+        // Mirror kosong generate()'s pre-flight abort check: a call whose
+        // signal is already aborted never reaches the wire (generate throws
+        // before dispatching), so it must not leave a request trace or a
+        // diagnostic log line claiming a request was sent.
+        if (requestOptions?.signal?.aborted !== true) {
+          this.llmRequestLogger.logRequest({
+            provider,
+            modelAlias,
+            systemPrompt,
+            tools,
+            messages: history,
+            fields: requestLogFields,
+          });
+          this.llmRequestRecorder.record({
+            provider,
+            systemPrompt,
+            tools,
+            messages: history,
+            fields: requestLogFields,
+          });
+        }
         return this.rawGenerate(provider, systemPrompt, tools, history, callbacks, requestOptions);
       };
       if (generateOptions?.auth !== undefined) {
@@ -480,6 +530,9 @@ export class Agent {
       pauseGoal: () => this.goal.pauseGoal(),
       resumeGoal: () => this.goal.resumeGoal(),
       cancelGoal: () => this.goal.cancelGoal(),
+      // `cron` is null for subagents, which never schedule; report an empty
+      // list rather than failing the RPC so callers can poll uniformly.
+      getCronTasks: () => ({ tasks: this.cron?.listTaskSnapshots() ?? [] }),
       getBackgroundOutput: (payload) => this.background.readOutput(payload.taskId, payload.tail),
       getContext: () => this.context.data(),
       getConfig: () => this.config.data(),
