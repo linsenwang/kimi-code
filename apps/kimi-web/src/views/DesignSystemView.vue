@@ -194,6 +194,8 @@ onUnmounted(() => {
                 <tr><td class="tk">--color-line</td><td class="val"><span class="swatch" style="background:#e7eaee"></span>#e7eaee</td><td class="val"><span class="swatch" style="background:#2d333b"></span>#2d333b</td><td>Divider / card border</td></tr>
                 <tr><td class="tk">--color-selected</td><td class="val"><span class="swatch" style="background:#00000014"></span>#00000014</td><td class="val"><span class="swatch" style="background:#ffffff14"></span>#ffffff14</td><td>Neutral selected fill (sidebar rows, list pickers) — translucent, never accent-tinted</td></tr>
                 <tr><td class="tk">--color-hover</td><td class="val"><span class="swatch" style="background:#0000000d"></span>#0000000d</td><td class="val"><span class="swatch" style="background:#ffffff0d"></span>#ffffff0d</td><td>Row hover wash — lighter than the selected fill (hover &lt; selected); translucent, sits on any surface</td></tr>
+                <tr><td class="tk">--color-media-alpha-bg-1</td><td class="val"><span class="swatch" style="background:#858585"></span>≈#858585</td><td class="val"><span class="swatch" style="background:#676b72"></span>≈#676b72</td><td>Checkerboard square A of the <code>&lt;img&gt;</code> alpha canvas — color-mix of <code>--color-bg</code>/<code>--color-text</code> (52/48); applied via <code>--media-alpha-canvas</code> (16px period)</td></tr>
+                <tr><td class="tk">--color-media-alpha-bg-2</td><td class="val"><span class="swatch" style="background:#6b6b6b"></span>≈#6b6b6b</td><td class="val"><span class="swatch" style="background:#7a7e85"></span>≈#7a7e85</td><td>Checkerboard square B (42/58) — both squares stay ≥3:1 against white and black; opaque images cover the canvas</td></tr>
                 <tr><td class="tk">--color-sidebar-bg</td><td class="val"><span class="swatch" style="background:#fbfaf9"></span>#fbfaf9</td><td class="val"><span class="swatch" style="background:#181817"></span>#181817</td><td>Sidebar surface — one step off <code>--color-bg</code> so the session column reads as its own plane</td></tr>
                 <tr><td class="tk">--color-accent</td><td class="val"><span class="swatch" style="background:#1783ff"></span>#1783ff</td><td class="val"><span class="swatch" style="background:#58a6ff"></span>#58a6ff</td><td>Primary action / link / focus</td></tr>
                 <tr><td class="tk">--color-success</td><td class="val"><span class="swatch" style="background:#0e7a38"></span>#0e7a38</td><td class="val"><span class="swatch" style="background:#3fb950"></span>#3fb950</td><td>Success / pass</td></tr>
@@ -417,8 +419,10 @@ onUnmounted(() => {
               <thead><tr><th>Token</th><th>Value</th><th>Usage</th></tr></thead>
               <tbody>
                 <tr><td class="tk">--p-sidebar-w</td><td class="val">264px</td><td>left session sidebar width</td></tr>
-                <tr><td class="tk">--p-content-max</td><td class="val">760px</td><td>chat reading-column max width</td></tr>
+                <tr><td class="tk">--p-content-max</td><td class="val">760px</td><td>chat reading-column max width (regular chat prose)</td></tr>
                 <tr><td class="tk">--p-content-wide</td><td class="val">920px</td><td>wide content (settings / panel)</td></tr>
+                <tr><td class="tk">--p-table-max</td><td class="val">1040px</td><td>desktop wide-table max width (see §04)</td></tr>
+                <tr><td class="tk">--p-table-cell-max</td><td class="val">700px</td><td>max width of a single table column; longer cell content wraps (see §04)</td></tr>
                 <tr><td class="tk">--p-bp-sm</td><td class="val">640px</td><td>mobile / desktop boundary</td></tr>
                 <tr><td class="tk">--p-bp-md</td><td class="val">980px</td><td>narrow / wide screen boundary</td></tr>
               </tbody>
@@ -1118,6 +1122,7 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+            <p><b>Wide markdown tables (desktop):</b> regular chat prose stays within the 760px reading column (<code>--p-content-max</code>). On desktop a wide table may grow naturally with its content up to 1040px (<code>--p-table-max</code>), centred within the conversation pane; beyond that the excess scrolls horizontally inside the table's own wrapper — the page and the chat area never scroll sideways. A single column is capped at 700px (<code>--p-table-cell-max</code>), so long cell content wraps inside the cell instead of stretching the table. The conversation outline (TOC) keeps its usual position just outside the reading column; when a table grows past it and scrolls under the rail, the TOC is hidden temporarily and returns as soon as the table leaves, without touching the user's TOC setting. On mobile a table never breaks out of the reading column.</p>
 
             <h3 class="sub">Tool calls: compact by default, grouped, expand on demand</h3>
             <p>High-frequency calls like <code>read_file</code> / <code>bash</code> / <code>grep</code> are "operational noise" — if each one took a full card, parallel triggers would quickly drown out the conversation.
@@ -1446,7 +1451,7 @@ onUnmounted(() => {
               <tbody>
                 <tr><td>Width / cursor</td><td>4px / <code>col-resize</code></td></tr>
                 <tr><td>Normal / active</td><td>transparent / <code>accent</code> fill</td></tr>
-                <tr><td>Layer</td><td><code>--z-sticky</code>, over the column border</td></tr>
+                <tr><td>Layer</td><td><code>--z-dropdown</code>, above pane-level sticky chrome (chat dock at <code>--z-sticky</code>) so the overhang stays visible and grabbable</td></tr>
                 <tr><td>Behavior</td><td>panel width follows the pointer 1:1 while dragging (the parent disables transitions to avoid lag); on release it is persisted to localStorage</td></tr>
               </tbody>
             </table>
@@ -1878,9 +1883,10 @@ onUnmounted(() => {
     font-family: var(--font-ui); color: var(--color-text); font-size: var(--text-base);
   }
   /* ---- Dark skin overrides ---- */
-  [data-p="dark"] {
+  .ds-page [data-p="dark"] {
     --p-bg: #0d1117; --p-surface: #161b22; --p-surface-raised: #1c2128; --p-surface-sunken: #0d1117;
     --p-text: #c9cdd4; --p-text-muted: #9aa0a8; --p-text-faint: #6b7280;
+    --p-text-on-accent: #ffffff;
     --p-line: #2d333b; --p-line-strong: #3d444d;
     --p-accent: #58a6ff; --p-accent-hover: #79b8ff; --p-accent-soft: rgba(88,166,255,.14); --p-accent-bd: rgba(88,166,255,.28);
     --p-success: #3fb950; --p-success-soft: rgba(63,185,80,.14); --p-success-bd: rgba(63,185,80,.28);
@@ -2120,7 +2126,7 @@ onUnmounted(() => {
   .p-composer-ta.ph { color: var(--p-text-faint); }
   .p-composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 8px; }
   .p-composer-left, .p-composer-right { display: flex; align-items: center; gap: 2px; }
-  .p-send { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--p-accent); color: #fff; border: none; cursor: pointer; box-shadow: var(--p-sh-xs); transition: transform var(--p-dur-fast) var(--p-ease), background var(--p-dur) var(--p-ease); }
+  .p-send { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--p-accent); color: var(--p-text-on-accent); border: none; cursor: pointer; box-shadow: var(--p-sh-xs); transition: transform var(--p-dur-fast) var(--p-ease), background var(--p-dur) var(--p-ease); }
   .p-send:hover { background: var(--p-accent-hover); }
   .p-send:active { transform: scale(.92); }
   .p-send .p-ic { width: 16px; height: 16px; }
@@ -2199,11 +2205,11 @@ onUnmounted(() => {
   .p-switch::after {
     content: ""; position: absolute; top: 2px; left: 2px;
     width: 16px; height: 16px; border-radius: var(--p-r-full);
-    background: var(--p-surface-raised); box-shadow: var(--p-sh-xs);
+    background: var(--surface-light); box-shadow: var(--p-sh-xs);
     transition: transform var(--p-dur) var(--p-ease);
   }
   .p-switch.on { background: var(--p-accent); }
-  .p-switch.on::after { transform: translateX(16px); }
+  .p-switch.on::after { background: var(--p-text-on-accent); transform: translateX(16px); }
   .p-switch:focus-visible { outline: none; box-shadow: var(--p-focus-ring); }
 
   /* ===== Checkbox ===== */

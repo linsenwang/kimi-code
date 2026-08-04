@@ -211,6 +211,25 @@ summary {
   color-scheme: light dark;
 }
 
+/* Safe-area insets + chat-dock metrics ---------------------------------------
+   Centralised so mobile layout reads one consistent source instead of each
+   component calling env(safe-area-inset-*) with its own fallback. Falls back to
+   0px where the UA doesn't expose insets (most desktops, older Android);
+   pair with max(min, var(--safe-bottom)) so gestures / home indicators keep a
+   minimum gutter even when the inset reports 0. The mobile footer (composer),
+   bottom sheets and the toast layer all consume these. */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  /* Border-box height of the chat dock, written by ChatDock via ResizeObserver.
+     Used to anchor fixed overlays (toasts, floating hints) just above the
+     composer — dynamic so multi-line input growth keeps them clear. Left
+     undeclared on purpose: consumers use a fallback (e.g. the assumed
+     single-line dock height) on pages where ChatDock is not mounted. */
+}
+
 /* -- icon primitive (design-system §02) -------------------------------------
    Applied to every design-system icon: the <Icon> component output
    (components/ui/Icon.vue) and the iconSvg() v-html strings (lib/icons.ts).
@@ -318,15 +337,15 @@ html[data-accent="mono"] {
 }
 
 /* mono accent × dark: the light grayscale above would win over the dark
-   variables (same specificity, later in source) — remap to dark grays.
-   Text/icons sitting ON the accent colour use var(--bg), so the near-white
-   accent stays readable here. */
+   variables (same specificity, later in source) — remap to dark grays and
+   pair the near-white accent with the scheme background as its foreground. */
 html[data-color-scheme="dark"][data-accent="mono"] {
   --accent-primary: #e8eaed;
   --color-accent: #e8eaed;
   --color-accent-hover: #c9cdd4;
   --color-accent-soft: #21262d;
   --color-accent-bd: #444c56;
+  --color-text-on-accent: var(--color-bg);
   --blue: #e8eaed;
   --blue2: #c9cdd4;
   --soft: #21262d;
@@ -342,6 +361,7 @@ html[data-color-scheme="dark"][data-accent="mono"] {
     --color-accent-hover: #c9cdd4;
     --color-accent-soft: #21262d;
     --color-accent-bd: #444c56;
+    --color-text-on-accent: var(--color-bg);
     --blue: #e8eaed;
     --blue2: #c9cdd4;
     --soft: #21262d;
@@ -377,6 +397,18 @@ html[data-color-scheme="dark"][data-accent="mono"] {
   --color-surface: #fafbfc;
   --color-surface-raised: #ffffff;
   --color-surface-sunken: #f3f5f8;
+  /* Checkerboard canvas behind <img> so transparent PNGs keep white/black
+     content visible and read as transparent. Squares are mixed from the
+     theme's bg/text (≈#858585/#6b6b6b light, ≈#676b72/#7a7e85 dark), each
+     ≥3:1 against both white and black; opaque images simply cover it. */
+  --color-media-alpha-bg-1: color-mix(in srgb, var(--color-bg) 52%, var(--color-text) 48%);
+  --color-media-alpha-bg-2: color-mix(in srgb, var(--color-bg) 42%, var(--color-text) 58%);
+  --media-alpha-canvas: conic-gradient(
+    var(--color-media-alpha-bg-1) 25%,
+    var(--color-media-alpha-bg-2) 0 50%,
+    var(--color-media-alpha-bg-1) 0 75%,
+    var(--color-media-alpha-bg-2) 0
+  ) 0 0 / 16px 16px;
   /* Foreground text colours. `--color-text` is the default solid body / UI
      colour (headings and emphasis share it); muted / faint step down for
      secondary and tertiary copy; on-accent is text drawn on the accent fill. */
@@ -503,6 +535,8 @@ html[data-color-scheme="dark"][data-accent="mono"] {
   --p-sidebar-w: 264px;
   --p-content-max: 760px;
   --p-content-wide: 920px;
+  --p-table-max: 1040px;
+  --p-table-cell-max: 700px;
   --p-bp-sm: 640px;
   --p-bp-md: 980px;
 }

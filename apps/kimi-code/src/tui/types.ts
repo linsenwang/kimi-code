@@ -9,7 +9,7 @@ import type {
   ToolInputDisplay,
 } from '@moonshot-ai/kimi-code-sdk';
 
-import type { NotificationsConfig, UpgradePreferences } from './config';
+import type { NotificationsConfig, StatusLineConfig, UpgradePreferences } from './config';
 import type { PendingApproval, PendingQuestion } from './reverse-rpc/types';
 import type { ColorToken, ThemeName } from './theme';
 
@@ -53,6 +53,8 @@ export interface AppState {
   keybindings: Record<string, string | string[]>;
   notifications: NotificationsConfig;
   upgrade: UpgradePreferences;
+  /** Footer status line customization from tui.toml; absent means the default layout. */
+  statusLine?: StatusLineConfig;
   availableModels: Record<string, ModelAlias>;
   availableProviders: Record<string, ProviderConfig>;
   sessionTitle: string | null;
@@ -167,6 +169,13 @@ export interface TranscriptEntry {
   turnId?: string;
   renderMode: 'markdown' | 'plain' | 'notice';
   content: string;
+  /**
+   * True only for entries holding real model-authored text (created by the
+   * assistant stream). Derived cards — hook results, goal completions, goal
+   * reminders — share kind 'assistant' but are not replies, so /copy must
+   * skip them.
+   */
+  modelText?: boolean;
   color?: ColorToken;
   detail?: string;
   /** Optional override for the leading bullet of a 'user' message entry. An empty string suppresses the bullet entirely (used by shell-command echoes so `$` replaces the sparkles marker). */
@@ -207,6 +216,18 @@ export interface QueuedMessage {
   readonly mode?: 'prompt' | 'bash';
 }
 
+/**
+ * One unit of Ctrl-S steer input: a queued message or the editor draft,
+ * with the media parts extracted at submit/paste time so images and video
+ * tags survive the steer path (which accepts full prompt parts, not just
+ * text).
+ */
+export interface SteerInputItem {
+  readonly text: string;
+  readonly parts?: readonly PromptPart[];
+  readonly imageAttachmentIds?: readonly number[];
+}
+
 export const INITIAL_LIVE_PANE: LivePaneState = {
   mode: 'idle',
   pendingApproval: null,
@@ -224,6 +245,10 @@ export interface TUIStartupOptions {
   readonly auto: boolean;
   readonly plan: boolean;
   readonly model?: string;
+  /** Resolved profile name from --agent/--agent-file; bound to the startup session only. */
+  readonly agentProfile?: string;
+  /** Raw --agent-file paths, passed to session creation alongside `agentProfile`. */
+  readonly agentFiles?: readonly string[];
   readonly startupNotice?: string;
 }
 

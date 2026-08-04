@@ -5,9 +5,10 @@ import {
   resolveConfigPath,
   resolveKimiHome,
   type KimiConfig,
-  type KimiHarness,
   type TelemetryClient,
 } from '@moonshot-ai/kimi-code-sdk';
+
+import type { PromptHarness } from './prompt-session';
 import {
   initializeTelemetry,
   setTelemetryContext,
@@ -26,7 +27,7 @@ export interface CliTelemetryBootstrap {
 }
 
 export interface InitializeCliTelemetryOptions {
-  readonly harness: KimiHarness;
+  readonly harness: PromptHarness;
   readonly bootstrap: CliTelemetryBootstrap;
   readonly config: Pick<KimiConfig, 'defaultModel' | 'telemetry'>;
   readonly version: string;
@@ -69,7 +70,7 @@ export interface InitializeServerTelemetryOptions {
 }
 
 /**
- * Bootstrap telemetry for the `kimi web` / `kimi server run` host.
+ * Bootstrap telemetry for the `kimi web` host.
  *
  * Mirrors {@link initializeCliTelemetry}: mints the device id, reads config to
  * honor the `telemetry` toggle and pick up the default model, attaches the

@@ -89,10 +89,10 @@ function persistedProcess(
   };
 }
 
-async function taskOutput(manager: BackgroundManager, taskId: string, block = false): Promise<string> {
+async function taskOutput(manager: BackgroundManager, taskId: string): Promise<string> {
   const result = await executeTool(
     new TaskOutputTool(manager),
-    context('task_output', { task_id: taskId, block, timeout: 1 }),
+    context('task_output', { task_id: taskId }),
   );
   expect(result.isError).toBe(false);
   return toolContentString(result);
@@ -256,7 +256,7 @@ describe('TaskOutputTool', () => {
 
       await manager.wait(taskId);
       await waitForOutput(manager, taskId, 'STDOUT-PAYLOAD-LINE');
-      const content = await taskOutput(manager, taskId, true);
+      const content = await taskOutput(manager, taskId);
 
       expect(content).toContain('status: completed');
       expect(content).toContain('output_path:');
@@ -325,16 +325,7 @@ describe('TaskOutputTool', () => {
 
     expect(content).toContain('retrieval_status: not_ready');
     expect(content).toContain('status: running');
-  });
-
-  it('returns timeout for block=true when a running task does not finish', async () => {
-    const { manager } = createBackgroundManager();
-    const taskId = registerProcess(manager, pendingProcess(), 'sleep 60', 'blocking task');
-
-    const content = await taskOutput(manager, taskId, true);
-
-    expect(content).toContain('retrieval_status: timeout');
-    expect(content).toContain('status: running');
+    expect(content).not.toContain('next_step');
   });
 
   it('surfaces timeout terminal metadata', async () => {
@@ -348,7 +339,7 @@ describe('TaskOutputTool', () => {
     const terminal = manager.wait(taskId);
     await vi.advanceTimersByTimeAsync(5_010);
     await terminal;
-    const content = await taskOutput(manager, taskId, true);
+    const content = await taskOutput(manager, taskId);
 
     expect(content).toContain('status: timed_out');
     expect(content).not.toContain('stop_reason:');
@@ -563,11 +554,13 @@ describe('TaskStopTool', () => {
 describe('background tool descriptions', () => {
   const manager = createBackgroundManager().manager;
 
-  it('TaskOutput description mentions background tasks, block, output_path, and Read', () => {
+  it('TaskOutput description documents non-blocking snapshots, output_path, and Read', () => {
     const description = new TaskOutputTool(manager).description;
 
     expect(description).toMatch(/background/i);
-    expect(description).toMatch(/block/);
+    expect(description).toMatch(/non-blocking/);
+    // The blocking wait was removed — the description must not reference it.
+    expect(description).not.toContain('block=');
     expect(description).toMatch(/output_path/);
     expect(description).toMatch(/Read/);
     // terminal_reason can also be `failed` (task-output.ts terminalReason), not

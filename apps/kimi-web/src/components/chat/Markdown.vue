@@ -16,7 +16,7 @@ import { useIsDark } from '../../composables/useIsDark';
 import type { FilePreviewRequest } from '../../types';
 import { collectFilePathAliases, findFilePathLinks } from '../../lib/filePathLinks';
 import { markdownRenderPlan } from '../../lib/markdownPerformance';
-import { copyTextToClipboard } from '../../lib/clipboard';
+import { copyCodeBlockFallback, copyTextToClipboard } from '../../lib/clipboard';
 import * as katexWorkerModule from 'markstream-vue/workers/katexRenderer.worker?worker&type=module';
 import * as mermaidWorkerModule from 'markstream-vue/workers/mermaidParser.worker?worker&type=module';
 import Tooltip from '../ui/Tooltip.vue';
@@ -327,7 +327,22 @@ const CODE_DARK_THEME = 'github-dark';
 // blank placeholders. Pinning `loading` to false drops the skeleton entirely:
 // the block renders its plain-text fallback immediately and shiki upgrades it to
 // the highlighted version when the highlighter is ready. Streaming blocks are
-// unaffected (their `stream` is true, so the skeleton gate was already false).
+// unaffected (their `stream` is true, so the skeleton gate was already
+// false).
+// Chat code blocks show no gutter: line numbers eat 3+ characters of reading
+// width and every chat block starts at line 1 anyway. stream-diffs derives its
+// gutter from `lineNumbers === false` (boolean, not monaco's 'off' string).
+// This rides inside codeBlockProps because markstream only forwards the
+// top-level codeBlockMonacoOptions to the 'monaco' renderer kind — the 'shiki'
+// kind's props object omits it, while codeBlockProps reach the same component.
+//
+// fontSize / fontFamily matter as much as the gutter: since 1.0.9 the shiki
+// renderer (stream-diffs) applies these options as inline styles on the code
+// container (`applyEditorStyles`), so CSS overrides cannot beat them — the
+// values must be passed here. fontSize mirrors --text-sm (13px). `padding`
+// is ignored by the settled renderer (it draws inside a shadow root; its
+// vertical padding comes from `--diffs-gap-block` below) but sets the loading
+// fallback's inline padding, keeping the fallback → settled swap stable.
 const codeBlockProps = {
   showHeader: true,
   showCopyButton: true,
@@ -336,6 +351,12 @@ const codeBlockProps = {
   showCollapseButton: false,
   showFontSizeButtons: false,
   loading: false,
+  monacoOptions: {
+    lineNumbers: false,
+    fontSize: 13,
+    fontFamily: 'var(--font-mono)',
+    padding: { top: 12, bottom: 12 },
+  },
 };
 
 // Root cause for the "large session turns into code skeletons" failure:
@@ -437,6 +458,7 @@ function copyDiff(code: string, idx: number) {
         :smooth-streaming="streaming"
         :batch-rendering="allowBatchRender"
         :defer-nodes-until-visible="false"
+        @copy="copyCodeBlockFallback"
       />
 
       <!-- ```diff fence → local renderer (preserves +/- markers + colours) -->
@@ -521,6 +543,12 @@ function copyDiff(code: string, idx: number) {
 .md :deep(.markdown-renderer td),
 .md :deep(.markdown-renderer th) {
   font-size: var(--content-font-size);
+}
+
+/* Themed surfaces swallow white-on-transparent (light) or black-on-transparent
+   (dark) images; the checkerboard canvas keeps both visible. */
+.md :deep(.markdown-renderer img) {
+  background: var(--media-alpha-canvas);
 }
 
 /* Emphasis — keep the weight strong, but soften the ink slightly. */
@@ -614,9 +642,9 @@ function copyDiff(code: string, idx: number) {
   font-family: var(--font-ui);
 }
 /* Copy button — mirrors the §03 IconButton: muted glyph, sunken hover, soft
-   radius, and the shared focus ring. markstream renders its own button, so we
-   restyle it in place instead of swapping in the IconButton primitive. */
-.md :deep(.code-block-header .copy-button),
+   radius, and the shared focus ring. markstream renders its own button (the
+   `.code-action-btn` class since 1.0.9 — the old `.copy-button` is gone), so
+   we restyle it in place instead of swapping in the IconButton primitive. */
 .md :deep(.code-block-header .code-action-btn) {
   color: var(--color-text-muted);
   background: transparent;
@@ -626,23 +654,48 @@ function copyDiff(code: string, idx: number) {
   transition: background var(--duration-base) var(--ease-out),
     color var(--duration-base) var(--ease-out);
 }
-.md :deep(.code-block-header .copy-button:hover),
 .md :deep(.code-block-header .code-action-btn:hover) {
   background: var(--color-surface-sunken);
   color: var(--color-text);
 }
-.md :deep(.code-block-header .copy-button:focus-visible),
 .md :deep(.code-block-header .code-action-btn:focus-visible) {
   outline: none;
   box-shadow: var(--p-focus-ring);
 }
-.md :deep(.code-block-header .copy-button *),
 .md :deep(.code-block-header .code-action-btn *) {
   pointer-events: none;
 }
-.md :deep(.code-block-content),
+/* The code body wrapper was renamed in 1.0.9: `.code-block-content` is gone,
+   the shiki (stream-diffs) block now mounts under `.code-block-shell-content`. */
+.md :deep(.code-block-shell-content),
 .md :deep(.markstream-pre) {
   background: var(--color-surface-sunken);
+}
+/* Pierre renders the highlighted code inside a shadow root. Its native gap
+   variable inherits through that boundary; the Monaco `padding` option above
+   does not, but it sets the loading fallback's inline padding — both layers
+   end up at 12px. Line height stays relative (1.65) so every rendering path
+   shares the token ratio without pinning a px value into inline styles. */
+.md :deep(.code-editor-container) {
+  line-height: 1.65;
+  --diffs-gap-block: var(--space-3);
+}
+.md :deep(.code-editor-container diffs-container) {
+  --diffs-line-height: 1.65em;
+}
+/* Loading/streaming fallback <pre>: upstream hardcodes show-line-numbers on
+   it while the settled stream-diffs block honors lineNumbers:false — the
+   gutter (and its reserved padding) popping in and out on every load is a
+   visible flash. Hide the fallback gutter, pin its left inset to the settled
+   per-line padding (1ch), and force the shared 1.65 line height over the
+   inline 1.5×-font-size default upstream stamps on the pre, so the
+   fallback → highlighted swap is layout-stable. */
+.md :deep(.code-pre-fallback > .markstream-pre__line-numbers) {
+  display: none;
+}
+.md :deep(.code-block-container .code-pre-fallback) {
+  padding-left: 1ch;
+  line-height: 1.65 !important;
 }
 .md :deep(.code-block-container pre:not(.code-pre-fallback):not(.markstream-pre--line-numbers)),
 .md :deep(.markstream-pre:not(.code-pre-fallback):not(.markstream-pre--line-numbers)) {
@@ -661,8 +714,8 @@ function copyDiff(code: string, idx: number) {
 }
 .md :deep(.markstream-pre),
 .md :deep(.code-pre-fallback),
-.md :deep(.code-block-content pre:not(.shiki)),
-.md :deep(.code-block-content pre:not(.shiki) code) {
+.md :deep(.code-block-shell-content pre:not(.shiki)),
+.md :deep(.code-block-shell-content pre:not(.shiki) code) {
   color: var(--color-text);
 }
 
@@ -723,37 +776,58 @@ function copyDiff(code: string, idx: number) {
   font-weight: var(--weight-medium);
 }
 
-/* Markdown tables. markstream-vue pins these to the message width
-   (`width:100%` + `table-layout:fixed`), squeezing wide content into narrow
-   columns. Instead we size columns to their content (`width:auto` +
-   `table-layout:auto`) and let cells WRAP, so a wide table fills the reading
-   column and wraps its text rather than being crushed or scrolling. (An earlier
-   attempt to break the table out into a *wider* column than the prose — via
-   container units and then fixed @container caps — is parked; see the handover
-   doc.) `!important` beats markstream's scoped `.table-node[data-v-…]` rules
-   regardless of injection order. */
+/* Markdown tables — wide tables scroll horizontally INSIDE the table's own
+   wrapper instead of squeezing into (or overflowing) the reading column.
+   The wrapper is a fixed-width local scroll container: it stays pinned to the
+   message width (`width:100%`, `min-width:0` so it can shrink inside flex
+   tracks) and clips any overflow behind its own `overflow-x:auto` scrollbar —
+   the chat pane and the page never scroll sideways. The table itself grows to
+   its content width (`width:max-content`, `max-width:none`,
+   `table-layout:auto`), so many-column or long-cell tables keep their natural
+   layout and only the excess scrolls within the wrapper. `min-width:100%` keeps
+   narrow tables stretched to fill the wrapper exactly as before. `!important`
+   beats markstream's scoped `.table-node[data-v-…]` rules regardless of
+   injection order. */
+.md :deep(.table-node-wrapper) {
+  width: 100%;
+  max-width: 100% !important;
+  min-width: 0;
+  overflow-x: auto !important;
+}
+
 .md :deep(.table-node) {
   --table-border: var(--color-line);
   --table-header-bg: var(--color-surface);
   font-size: var(--text-lg);
   margin: 0.5em 0;
-  width: auto !important;
-  max-width: 100% !important;
+  width: max-content !important;
+  min-width: 100%;
+  max-width: none !important;
   table-layout: auto !important;
-}
-/* Default: the table stays inside the reading column and its cells wrap to fit
-   — markstream's own cell default is already `white-space:normal`, so a wide
-   table simply wraps into the column instead of forcing a horizontal scroll.
-   `max-content` + `max-width:100%` sizes columns to their content up to the
-   column width; `overflow-x:auto` is a safety net for an unbreakable cell. */
-.md :deep(.table-node-wrapper) {
-  width: max-content;
-  max-width: 100% !important;
-  overflow-x: auto !important;
 }
 .md :deep(.table-node th),
 .md :deep(.table-node td) {
   text-align: left;
+  vertical-align: top;
+  /* Cap runaway columns: a single cell with long prose should stop stretching
+     its column at --p-table-cell-max and wrap inside the cell instead.
+     max-width on the cell itself only works in Firefox — Chromium ignores it
+     under table-layout:auto — so the clamp is reinforced on the content box
+     below. Wider tables made of many columns still scroll inside the
+     wrapper. */
+  max-width: var(--p-table-cell-max);
+}
+/* Chromium honors max-width on this inner box even under table-layout:auto:
+   markstream wraps plain-text cell content in a .text-node span, and as an
+   inline-block its max-content contribution to the column is clamped to
+   --p-table-cell-max, so the column stops there and the text wraps inside
+   (the span is already white-space:pre-wrap + overflow-wrap:break-word).
+   Cells mixing several inline children can still exceed the cap by the sum
+   of those children — acceptable; the runaway single-prose-cell case is the
+   one that matters. */
+.md :deep(.table-node .text-node) {
+  display: inline-block;
+  max-width: var(--p-table-cell-max);
   vertical-align: top;
 }
 

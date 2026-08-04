@@ -13,6 +13,13 @@ type KimiWebClient = ReturnType<typeof useKimiWebClient>;
 /** Which occupant currently owns the shared right-side detail layer. */
 export type DetailTarget = 'file' | 'diff' | 'thinking' | 'compaction' | 'agent' | 'toolDiff' | 'btw';
 
+/** Whether a url can feed a native <video>/<img> src. A provider reference like
+ *  `ms://…` has no local bytes and only yields a broken player, so it's treated
+ *  as non-loadable and falls through to the no-preview card. */
+export function isPlayableMediaUrl(url: string): boolean {
+  return /^(?:https?:|blob:|data:)/i.test(url);
+}
+
 export interface UseFilePreviewOptions {
   client: KimiWebClient;
   detailTarget: Ref<DetailTarget | null>;
@@ -134,14 +141,10 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
       if (result) {
         previewFile.value = { ...result, path: result.path || normalized.path };
       } else {
-        previewFile.value = {
-          path: normalized.path,
-          content: '',
-          encoding: 'utf-8',
-          mime: 'text/plain',
-          isBinary: false,
-          size: 0,
-        };
+        // readFileContent swallows daemon failures into null — show the error
+        // state instead of a misleading 0-byte "empty file" (the cause is
+        // already console.warn'd in readFileContent).
+        previewError.value = t('filePreview.errors.loadFailed');
       }
     } catch (err) {
       if (requestSeq !== previewRequestSeq) return;
@@ -159,24 +162,25 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
   }
 
   function openMediaPreview(media: ToolMedia): void {
-    if (media.kind !== 'image') return;
+    if (media.kind !== 'image' && media.kind !== 'video') return;
     const seq = ++previewRequestSeq;
     revokeMediaObjectUrl();
     detailTarget.value = 'file';
     previewTarget.value = null;
     previewNormalizedPath.value = null;
     previewError.value = null;
+    const isVideo = media.kind === 'video';
     const base = {
-      path: media.path ?? 'ReadMediaFile image',
+      path: media.path ?? (isVideo ? 'Video' : 'ReadMediaFile image'),
       content: '',
       encoding: 'utf-8' as const,
-      mime: media.mimeType ?? mimeFromDataUrl(media.url) ?? 'image/*',
+      mime: media.mimeType ?? mimeFromDataUrl(media.url) ?? (isVideo ? 'video/*' : 'image/*'),
       isBinary: true,
       size: media.bytes ?? 0,
     };
+    // The raw URL 401s under daemon auth (browsers load media without the
+    // Bearer token), so fetch the bytes with auth and preview a blob URL.
     if (media.fileId) {
-      // The raw getFileUrl 401s under daemon auth (browsers load <img> without
-      // the Bearer token), so fetch the bytes with auth and preview a blob URL.
       previewLoading.value = true;
       previewFile.value = base;
       void getKimiWebApi().getFileBlob(media.fileId).then((blob) => {
@@ -198,7 +202,10 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
       });
     } else {
       previewLoading.value = false;
-      previewFile.value = { ...base, sourceUrl: media.url };
+      // A non-loadable url (e.g. a provider `ms://` reference with no local
+      // bytes) can't feed a <video>/<img> src — leave sourceUrl unset so the
+      // preview shows the no-preview card instead of a broken player.
+      previewFile.value = isPlayableMediaUrl(media.url) ? { ...base, sourceUrl: media.url } : base;
     }
   }
 

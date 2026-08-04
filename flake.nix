@@ -63,19 +63,25 @@
       # -------------------------------------------------------------------
       workspacePaths = [
         ./packages/acp-adapter
+        ./packages/acp-server
         ./packages/agent-core
-        ./packages/server
-        ./packages/server-e2e
+        ./packages/agent-core-v2
+        ./packages/kap-server
         ./packages/kaos
+        ./packages/klient
         ./packages/kosong
         ./packages/migration-legacy
+        ./packages/minidb
         ./packages/node-sdk
         ./packages/oauth
         ./packages/pi-tui
         ./packages/protocol
         ./packages/telemetry
+        ./packages/transcript
+        ./packages/tree-sitter-bash
         ./apps/kimi-code
-        ./apps/kimi-desktop
+        ./apps/vscode
+        ./apps/kimi-inspect
         ./apps/kimi-web
         ./apps/vis
         ./apps/vis/server
@@ -85,19 +91,25 @@
 
       workspaceNames = [
         "@moonshot-ai/acp-adapter"
+        "@moonshot-ai/acp-server"
         "@moonshot-ai/agent-core"
-        "@moonshot-ai/server"
-        "@moonshot-ai/server-e2e"
+        "@moonshot-ai/agent-core-v2"
+        "@moonshot-ai/kap-server"
         "@moonshot-ai/kaos"
         "@moonshot-ai/kosong"
         "@moonshot-ai/migration-legacy"
+        "@moonshot-ai/minidb"
         "@moonshot-ai/kimi-code-sdk"
         "@moonshot-ai/kimi-code-oauth"
+        "@moonshot-ai/klient"
         "@moonshot-ai/pi-tui"
         "@moonshot-ai/protocol"
         "@moonshot-ai/kimi-telemetry"
+        "@moonshot-ai/transcript"
+        "@moonshot-ai/tree-sitter-bash"
         "@moonshot-ai/kimi-code"
-        "@moonshot-ai/kimi-desktop"
+        "kimi-code"
+        "@moonshot-ai/kimi-inspect"
         "@moonshot-ai/kimi-web"
         "@moonshot-ai/vis"
         "@moonshot-ai/vis-server"
@@ -152,7 +164,7 @@
               inherit (finalAttrs) pname version src pnpmWorkspaces;
               inherit pnpm;
               fetcherVersion = 3;
-              hash = "sha256-iBk+TV+rIhmd7bYnVFbW3kTGltojJl3pL2hhmsGO+Fk=";
+              hash = "sha256-dRVe0stYIorD8H/SyAIAJof6JinpT/3E/I0lyllbFWg=";
             };
 
             nativeBuildInputs = [

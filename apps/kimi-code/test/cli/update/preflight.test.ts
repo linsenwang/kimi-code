@@ -228,6 +228,10 @@ async function flushBackgroundInstall(): Promise<void> {
 
 describe('runUpdatePreflight', () => {
   beforeEach(() => {
+    // Pin the experimental flag off so rollout gating is deterministic
+    // regardless of the host environment (the flag bypasses batch holds).
+    // Tests that exercise the bypass opt back in with `vi.stubEnv(..., '1')`.
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '');
     mocks.readUpdateInstallState.mockResolvedValue(emptyUpdateInstallState());
     mocks.writeUpdateInstallState.mockResolvedValue(undefined);
     mocks.loadTuiConfig.mockResolvedValue(tuiConfig());
@@ -482,6 +486,8 @@ describe('runUpdatePreflight', () => {
     const { stdout, options } = captureOutput();
     await expect(runUpdatePreflight('0.4.0', options)).resolves.toBe('continue');
     expect(stdout.join('')).toContain('brew upgrade kimi-code');
+    expect(stdout.join('')).toContain('Third-party sources may lag behind the official release.');
+    expect(stdout.join('')).toContain('https://www.kimi.com/code');
     expect(promptForInstallChoice).not.toHaveBeenCalled();
     expect(mocks.spawn).not.toHaveBeenCalled();
   });

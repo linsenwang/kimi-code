@@ -8,17 +8,32 @@ import {
   resetCapabilitiesCache,
   setCapabilities,
 } from '@moonshot-ai/pi-tui';
-import type { ApprovalRequest, ApprovalResponse, Event } from '@moonshot-ai/kimi-code-sdk';
+import type {
+  ApprovalRequest,
+  ApprovalResponse,
+  Event,
+  GoalSnapshot,
+} from '@moonshot-ai/kimi-code-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApprovalPanelComponent } from '#/tui/components/dialogs/approval-panel';
+import { EffortSelectorComponent } from '#/tui/components/dialogs/effort-selector';
 import { KIMI_CODE_PLUGIN_MARKETPLACE_URL } from '#/constant/app';
 import { MOON_SPINNER_FRAMES } from '#/tui/constant/rendering';
 import {
   AgentSwarmProgressComponent,
   agentSwarmGridHeightForTerminalRows,
 } from '#/tui/components/messages/agent-swarm-progress';
+import { AssistantMessageComponent } from '#/tui/components/messages/assistant-message';
+import { StepSummaryComponent } from '#/tui/components/messages/step-summary';
+import { ToolCallComponent } from '#/tui/components/messages/tool-call';
+import {
+  TRANSCRIPT_KEEP_RECENT_ASSISTANT,
+  TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED,
+  TRANSCRIPT_KEEP_RECENT_STEPS,
+} from '#/tui/utils/transcript-window';
 import { BtwPanelComponent } from '#/tui/components/panes/btw-panel';
+import { ThinkingComponent } from '#/tui/components/messages/thinking';
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
 import { ModelSelectorComponent } from '#/tui/components/dialogs/model-selector';
 import { TabbedModelSelectorComponent } from '#/tui/components/dialogs/tabbed-model-selector';
@@ -125,6 +140,8 @@ function makeStartupInput(): KimiTUIStartupInput {
       outputFormat: undefined,
       prompt: undefined,
       skillsDirs: [],
+      agent: undefined,
+      agentFiles: [],
     },
     tuiConfig: {
       theme: 'dark',
@@ -133,6 +150,7 @@ function makeStartupInput(): KimiTUIStartupInput {
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
+      statusLine: { items: null, command: null },
     },
     version: '0.0.0-test',
     workDir: '/tmp/proj-a',
@@ -140,11 +158,14 @@ function makeStartupInput(): KimiTUIStartupInput {
 }
 
 function makeSession(overrides: Record<string, unknown> = {}) {
+  let model = 'k2';
+  let thinkingEffort = 'off';
   return {
     id: 'ses-1',
     model: 'k2',
     summary: { title: null },
-    prompt: vi.fn(async () => {}),
+    prompt: vi.fn(async (_input: unknown) => {}),
+    compact: vi.fn(async () => {}),
     steer: vi.fn(async () => {}),
     init: vi.fn(async () => {}),
     startBtw: vi.fn(async () => 'agent-btw'),
@@ -152,8 +173,8 @@ function makeSession(overrides: Record<string, unknown> = {}) {
     cancel: vi.fn(async () => {}),
     cancelCompaction: vi.fn(async () => {}),
     getStatus: vi.fn(async () => ({
-      model: 'k2',
-      thinkingEffort: 'off',
+      model,
+      thinkingEffort,
       permission: 'manual',
       planMode: false,
       contextTokens: 0,
@@ -163,8 +184,12 @@ function makeSession(overrides: Record<string, unknown> = {}) {
     getGoal: vi.fn(async () => ({ goal: null })),
     setApprovalHandler: vi.fn(),
     setQuestionHandler: vi.fn(),
-    setModel: vi.fn(async () => {}),
-    setThinking: vi.fn(async () => {}),
+    setModel: vi.fn(async (alias: string) => {
+      model = alias;
+    }),
+    setThinking: vi.fn(async (effort: string) => {
+      thinkingEffort = effort;
+    }),
     setPermission: vi.fn(async () => {}),
     setPlanMode: vi.fn(async () => {}),
     setSwarmMode: vi.fn(async () => {}),
@@ -291,6 +316,29 @@ async function makeDriver(
   driver.persistInputHistory = vi.fn(async () => {});
   await driver.init();
   return { driver, session, harness };
+}
+
+function makeActiveGoalSnapshot(): GoalSnapshot {
+  return {
+    goalId: 'g1',
+    objective: 'Ship the feature',
+    status: 'active',
+    turnsUsed: 3,
+    tokensUsed: 100,
+    wallClockMs: 1000,
+    budget: {
+      tokenBudget: null,
+      turnBudget: null,
+      wallClockBudgetMs: null,
+      remainingTokens: null,
+      remainingTurns: null,
+      remainingWallClockMs: null,
+      tokenBudgetReached: false,
+      turnBudgetReached: false,
+      wallClockBudgetReached: false,
+      overBudget: false,
+    },
+  };
 }
 
 function renderTranscript(driver: MessageDriver): string {
@@ -1537,6 +1585,63 @@ command = "vim"
     expect(transcript).not.toContain('review');
   });
 
+  it('sends a pasted video as a file:// video_url part', async () => {
+    const { driver, session } = await makeDriver();
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const dir = await mkdtemp(join(tmpdir(), 'tui-video-'));
+    try {
+      const srcVideo = join(dir, 'clip.mp4');
+      await writeFile(srcVideo, 'video-bytes');
+      const attachment = imageStore.addVideo('video/mp4', srcVideo);
+
+      // Submission is fully synchronous: the paste is copied to the cache and
+      // referenced by a `file://` video_url the engine resolves in-turn.
+      driver.handleUserInput(`watch ${attachment.placeholder}`);
+
+      const parts = vi.mocked(session.prompt).mock.calls[0]?.[0] as
+        | Array<{
+            type: string;
+            text?: string;
+            videoUrl?: { url: string };
+          }>
+        | undefined;
+      expect(parts?.[0]).toEqual({ type: 'text', text: 'watch ' });
+      expect(parts?.[1]?.type).toBe('video_url');
+      expect(parts?.[1]?.videoUrl?.url).toMatch(/^file:\/\/.*clip\.mp4$/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('queues a pasted video (file:// part) while a turn is streaming', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const dir = await mkdtemp(join(tmpdir(), 'tui-video-'));
+    try {
+      const srcVideo = join(dir, 'clip.mp4');
+      await writeFile(srcVideo, 'video-bytes');
+      const attachment = imageStore.addVideo('video/mp4', srcVideo);
+      driver.state.appState.streamingPhase = 'waiting';
+
+      driver.handleUserInput(`describe ${attachment.placeholder}`);
+
+      expect(session.prompt).not.toHaveBeenCalled();
+      expect(driver.state.queuedMessages).toHaveLength(1);
+      const queued = driver.state.queuedMessages[0];
+      const parts = queued?.parts as Array<{ type: string; text?: string; videoUrl?: { url: string } }>;
+      expect(parts?.[0]).toEqual({ type: 'text', text: 'describe ' });
+      expect(parts?.[1]?.type).toBe('video_url');
+      expect(parts?.[1]?.videoUrl?.url).toMatch(/^file:\/\/.*clip\.mp4$/);
+
+      driver.sendQueuedMessage(session, queued!);
+      expect(session.prompt).toHaveBeenCalledWith(parts);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+
   it('sends pasted image placeholders as image content parts', async () => {
     const { driver, session } = await makeDriver();
     const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
@@ -1568,6 +1673,91 @@ command = "vim"
     expect(driver.state.queuedMessages).toEqual([{ text: 'queued message', agentId: 'main' }]);
     expect(driver.state.queueContainer.children.length).toBeGreaterThan(0);
     expect(harness.track).toHaveBeenCalledWith('input_queue', undefined);
+  });
+
+  it('steers fresh input while a goal is active even when the streaming phase is idle', async () => {
+    const { driver, session } = await makeDriver();
+    driver.state.appState.goal = makeActiveGoalSnapshot();
+
+    driver.handleUserInput('hello mid-goal');
+
+    expect(session.steer).toHaveBeenCalledWith('hello mid-goal');
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(driver.state.transcriptEntries).toEqual([
+      expect.objectContaining({
+        kind: 'user',
+        content: 'hello mid-goal',
+      }),
+    ]);
+  });
+
+  it('resets the streaming phase when steering mid-goal input fails', async () => {
+    const session = makeSession({
+      steer: vi.fn(async () => {
+        throw new Error('session closed');
+      }),
+    });
+    const { driver } = await makeDriver(session);
+    driver.state.appState.goal = makeActiveGoalSnapshot();
+
+    driver.handleUserInput('hello mid-goal');
+
+    expect(driver.state.appState.streamingPhase).toBe('waiting');
+    await vi.waitFor(() => {
+      expect(driver.state.appState.streamingPhase).toBe('idle');
+    });
+    expect(stripSgr(renderTranscript(driver))).toContain('Failed to steer: session closed');
+  });
+
+  it('steers a queued message at a turn boundary while a goal is active', async () => {
+    const { driver, session } = await makeDriver();
+    driver.state.appState.goal = makeActiveGoalSnapshot();
+    driver.state.appState.streamingPhase = 'waiting';
+    driver.handleUserInput('mid-goal note');
+    expect(driver.state.queuedMessages).toEqual([{ text: 'mid-goal note', agentId: 'main' }]);
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.ended',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 0,
+        reason: 'completed',
+      } as Event,
+      (item) => {
+        driver.sendQueuedMessage(session, item);
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(session.steer).toHaveBeenCalledWith('mid-goal note');
+    });
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(driver.state.queuedMessages).toEqual([]);
+  });
+
+  it('prompts the queued message as a new turn when no goal is active', async () => {
+    const { driver, session } = await makeDriver();
+    driver.state.appState.streamingPhase = 'waiting';
+    driver.handleUserInput('after the turn');
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.ended',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 0,
+        reason: 'completed',
+      } as Event,
+      (item) => {
+        driver.sendQueuedMessage(session, item);
+      },
+    );
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('after the turn');
+    });
+    expect(session.steer).not.toHaveBeenCalled();
   });
 
   it('cancels active streaming from Escape and Ctrl-C editor shortcuts', async () => {
@@ -1728,6 +1918,225 @@ command = "vim"
 
     expect(session.steer).not.toHaveBeenCalled();
     expect(driver.state.editor.getText()).toBe('ls');
+  });
+
+  it('drains a queued image message with its media parts', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+    driver.state.appState.streamingPhase = 'waiting';
+
+    driver.handleUserInput(`describe ${attachment.placeholder}`);
+
+    expect(session.prompt).not.toHaveBeenCalled();
+    const queued = driver.state.queuedMessages[0];
+    expect(queued?.parts).toEqual([
+      { type: 'text', text: 'describe ' },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+    ]);
+
+    driver.sendQueuedMessage(session, queued!);
+
+    expect(session.prompt).toHaveBeenCalledWith([
+      { type: 'text', text: 'describe ' },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+    ]);
+  });
+
+  it('steers editor image input as media parts', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    driver.state.appState.model = 'k2';
+    driver.state.appState.streamingPhase = 'waiting';
+    driver.streamingUI.setTurnId('1');
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+    driver.state.editor.setText(`check ${attachment.placeholder}`);
+
+    driver.state.editor.onCtrlS?.();
+
+    expect(session.steer).toHaveBeenCalledWith([
+      { type: 'text', text: 'check ' },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+    ]);
+  });
+
+  it('steers queued image messages with their media parts', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    driver.state.appState.model = 'k2';
+    driver.state.appState.streamingPhase = 'waiting';
+    driver.streamingUI.setTurnId('1');
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+    driver.state.queuedMessages = [
+      {
+        text: `look ${attachment.placeholder}`,
+        agentId: 'main',
+        parts: [
+          { type: 'text', text: 'look ' },
+          { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+        ],
+        imageAttachmentIds: [attachment.id],
+      },
+    ];
+
+    driver.state.editor.onCtrlS?.();
+
+    expect(session.steer).toHaveBeenCalledWith([
+      { type: 'text', text: 'look ' },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+    ]);
+    expect(driver.state.queuedMessages).toEqual([]);
+  });
+
+  it('steers consecutive image-only messages without a whitespace-only separator part', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    driver.state.appState.model = 'k2';
+    driver.state.appState.streamingPhase = 'waiting';
+    driver.streamingUI.setTurnId('1');
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const first = imageStore.addImage(new Uint8Array([0xaa]), 'image/png', 1, 1);
+    const second = imageStore.addImage(new Uint8Array([0xbb]), 'image/png', 1, 1);
+    const imagePart = (bytes: Uint8Array) => ({
+      type: 'image_url' as const,
+      imageUrl: { url: `data:image/png;base64,${Buffer.from(bytes).toString('base64')}` },
+    });
+    driver.state.queuedMessages = [
+      {
+        text: first.placeholder,
+        agentId: 'main',
+        parts: [imagePart(first.bytes)],
+        imageAttachmentIds: [first.id],
+      },
+      {
+        text: second.placeholder,
+        agentId: 'main',
+        parts: [imagePart(second.bytes)],
+        imageAttachmentIds: [second.id],
+      },
+    ];
+
+    driver.state.editor.onCtrlS?.();
+
+    // normalizePromptInput rejects whitespace-only text parts, so the
+    // item separator must not become a standalone `{type:'text',text:'\n\n'}`
+    // between two image parts.
+    expect(session.steer).toHaveBeenCalledWith([imagePart(first.bytes), imagePart(second.bytes)]);
+  });
+
+  it('steers a media item followed by plain text with a blank-line separator', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    driver.state.appState.model = 'k2';
+    driver.state.appState.streamingPhase = 'waiting';
+    driver.streamingUI.setTurnId('1');
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+    driver.state.queuedMessages = [
+      {
+        text: `look ${attachment.placeholder}`,
+        agentId: 'main',
+        parts: [
+          { type: 'text', text: 'look ' },
+          { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+        ],
+        imageAttachmentIds: [attachment.id],
+      },
+      { text: 'focus on tests', agentId: 'main' },
+    ];
+
+    driver.state.editor.onCtrlS?.();
+
+    // The historical '\n\n' item separator merges into the following text
+    // part (legal for normalizePromptInput) instead of vanishing after a
+    // media part.
+    expect(session.steer).toHaveBeenCalledWith([
+      { type: 'text', text: 'look ' },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+      { type: 'text', text: '\n\nfocus on tests' },
+    ]);
+  });
+
+  it('steers plain text followed by a media item with a blank-line separator', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    driver.state.appState.model = 'k2';
+    driver.state.appState.streamingPhase = 'waiting';
+    driver.streamingUI.setTurnId('1');
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const attachment = imageStore.addImage(new Uint8Array([0xaa, 0xbb]), 'image/png', 1, 1);
+    driver.state.queuedMessages = [
+      { text: 'hello', agentId: 'main' },
+      {
+        text: attachment.placeholder,
+        agentId: 'main',
+        parts: [{ type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } }],
+        imageAttachmentIds: [attachment.id],
+      },
+    ];
+
+    driver.state.editor.onCtrlS?.();
+
+    expect(session.steer).toHaveBeenCalledWith([
+      { type: 'text', text: 'hello\n\n' },
+      { type: 'image_url', imageUrl: { url: 'data:image/png;base64,qrs=' } },
+    ]);
+  });
+
+  it('shows an error instead of throwing when skill media materialization fails', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    // The pasted video's source file vanished before submit — the cache copy
+    // throws, and it must surface as a TUI error, not an unhandled rejection.
+    const missing = imageStore.addVideo('video/quicktime', '/tmp/kimi-missing-source.mov');
+
+    (
+      driver as unknown as {
+        sendSkillActivation(s: unknown, name: string, args: string): void;
+      }
+    ).sendSkillActivation(session, 'test', `look ${missing.placeholder}`);
+
+    expect(session.activateSkill).not.toHaveBeenCalled();
+    expect(stripSgr(renderTranscript(driver))).toContain('Failed to prepare media attachment');
+  });
+
+  it('shows an error instead of throwing when plugin command media materialization fails', async () => {
+    const activatePluginCommand = vi.fn(async () => {});
+    const session = makeSession({ activatePluginCommand });
+    const { driver } = await makeDriver(session);
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const missing = imageStore.addVideo('video/mp4', '/tmp/kimi-missing-source.mp4');
+
+    (
+      driver as unknown as {
+        activatePluginCommand(s: unknown, pluginId: string, command: string, args: string): void;
+      }
+    ).activatePluginCommand(session, 'plug', 'cmd', missing.placeholder);
+
+    expect(activatePluginCommand).not.toHaveBeenCalled();
+    expect(stripSgr(renderTranscript(driver))).toContain('Failed to prepare media attachment');
+  });
+
+  it('keeps the queue and draft intact when steer media extraction fails', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session);
+    driver.state.appState.model = 'k2';
+    driver.state.appState.streamingPhase = 'waiting';
+    const imageStore = (driver as unknown as { imageStore: ImageAttachmentStore }).imageStore;
+    const missing = imageStore.addVideo('video/quicktime', '/tmp/kimi-missing-source.mov');
+    driver.state.queuedMessages = [{ text: 'queued note', agentId: 'main' }];
+    driver.state.editor.setText(`look ${missing.placeholder}`);
+
+    driver.state.editor.onCtrlS?.();
+
+    expect(session.steer).not.toHaveBeenCalled();
+    expect(driver.state.queuedMessages).toEqual([{ text: 'queued note', agentId: 'main' }]);
+    expect(driver.state.editor.getText()).toBe(`look ${missing.placeholder}`);
+    expect(stripSgr(renderTranscript(driver))).toContain('Failed to prepare media attachment');
   });
 
   it('recalls a queued bash command back into bash mode on Up', async () => {
@@ -2053,6 +2462,11 @@ command = "vim"
       sendQueued,
     );
 
+    // The fork expands tool output by default; collapse first so the summary
+    // is observed hidden until the user expands.
+    driver.state.editor.onToggleToolExpand?.();
+    expect(driver.state.toolOutputExpanded).toBe(false);
+
     const collapsed = driver.state.transcriptContainer.render(120).map(stripSgr).join('\n');
     expect(collapsed).toContain('Compaction complete');
     expect(collapsed).not.toContain('Keep the src/tui compaction notes.');
@@ -2068,7 +2482,8 @@ command = "vim"
     const { driver } = await makeDriver();
     const sendQueued = vi.fn();
 
-    driver.state.editor.onToggleToolExpand?.();
+    // The fork expands tool output by default; the compaction block created
+    // while expanded must show its summary.
     expect(driver.state.toolOutputExpanded).toBe(true);
 
     driver.sessionEventHandler.handleEvent(
@@ -2770,6 +3185,24 @@ command = "vim"
     expect(stripSgr(renderTranscript(driver))).toContain('LLM not set');
   });
 
+  it('applies the effective thinking effort from status updates', async () => {
+    const { driver } = await makeDriver();
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'agent.status.updated',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        model: 'turbo',
+        thinkingEffort: 'mid',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(driver.state.appState.model).toBe('turbo');
+    expect(driver.state.appState.thinkingEffort).toBe('mid');
+  });
+
   it('renders swarm mode markers from /swarm commands, not tool-triggered status updates', async () => {
     const { driver } = await makeDriver();
 
@@ -2931,6 +3364,45 @@ command = "vim"
     expect(transcript).toContain('OAuth login expired. Send /login to login.');
     expect(transcript).not.toContain('[auth.login_required]');
     expect(transcript).not.toContain('/export-debug-zip');
+  });
+
+  it('shows a programmatic abort reason instead of reporting a user interruption', async () => {
+    const { driver } = await makeDriver();
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.step.interrupted',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 1,
+        step: 1,
+        reason: 'aborted',
+        message: 'Tool execution timed out',
+      } as Event,
+      vi.fn(),
+    );
+
+    const transcript = stripSgr(renderTranscript(driver));
+    expect(transcript).toContain('Error: Tool execution timed out');
+    expect(transcript).not.toContain('Interrupted by user');
+  });
+
+  it('keeps unmessaged aborted events compatible with user interruptions', async () => {
+    const { driver } = await makeDriver();
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.step.interrupted',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 1,
+        step: 1,
+        reason: 'aborted',
+      } as Event,
+      vi.fn(),
+    );
+
+    expect(stripSgr(renderTranscript(driver))).toContain('Interrupted by user');
   });
 
   it('appends the /export-debug-zip hint beneath session error messages', async () => {
@@ -3589,7 +4061,7 @@ command = "vim"
       expect(output).toContain('Permissions  auto');
       expect(output).toContain('Plan mode    on');
       expect(output).toContain('Context window');
-      expect(output).toContain('25.0%');
+      expect(output).toContain('25%');
     });
   });
 
@@ -3731,6 +4203,75 @@ command = "vim"
     });
   });
 
+  it('shows a quota note after installing a quota-consuming official plugin', async () => {
+    const session = makeSession({
+      installPlugin: vi.fn(async () => ({
+        id: 'kimi-datasource',
+        displayName: 'Kimi Datasource',
+        version: '3.3.0',
+        enabled: true,
+        state: 'ok',
+        skillCount: 0,
+        mcpServerCount: 1,
+        enabledMcpServerCount: 1,
+        hasErrors: false,
+        source: 'zip-url',
+        originalSource: 'https://code.kimi.com/kimi-code/plugins/official/kimi-datasource.zip',
+      })),
+    });
+    const { driver } = await makeDriver(session);
+
+    // Official sources skip the trust prompt, so the install runs immediately.
+    driver.handleUserInput(
+      '/plugins install https://code.kimi.com/kimi-code/plugins/official/kimi-datasource.zip',
+    );
+
+    await vi.waitFor(() => {
+      const transcript = stripSgr(renderTranscript(driver));
+      expect(transcript).toContain('Run /new or /reload to apply plugin changes.');
+      expect(transcript).toContain('Note: This plugin consumes your quota.');
+    });
+  });
+
+  it('does not show the quota note for a same-id fork installed from a local path', async () => {
+    const session = makeSession({
+      installPlugin: vi.fn(async () => ({
+        id: 'kimi-datasource',
+        displayName: 'Kimi Datasource',
+        version: '3.3.0',
+        enabled: true,
+        state: 'ok',
+        skillCount: 0,
+        mcpServerCount: 1,
+        enabledMcpServerCount: 1,
+        hasErrors: false,
+        source: 'local-path',
+      })),
+    });
+    const { driver } = await makeDriver(session);
+
+    driver.handleUserInput('/plugins install ./plugins/kimi-datasource-fork');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(
+        PluginInstallTrustConfirmComponent,
+      );
+    });
+    const confirm = driver.state.editorContainer.children[0] as PluginInstallTrustConfirmComponent;
+    confirm.handleInput('\u001B[B'); // switch from "Exit" to "Trust and install"
+    confirm.handleInput('\r');
+
+    // The manifest id matches a billed plugin, but a local-path install is
+    // not the official quota-consuming build.
+    await vi.waitFor(() => {
+      const transcript = stripSgr(renderTranscript(driver));
+      expect(transcript).toContain('Installed Kimi Datasource');
+    });
+    expect(stripSgr(renderTranscript(driver))).not.toContain(
+      'Note: This plugin consumes your quota.',
+    );
+  });
+
   it('does not install when the third-party trust prompt is dismissed', async () => {
     const session = makeSession();
     const { driver } = await makeDriver(session);
@@ -3797,6 +4338,7 @@ command = "vim"
       const transcript = stripSgr(renderTranscript(driver));
       expect(transcript).toContain('Installed Demo');
       expect(transcript).toContain('Run /new or /reload to apply plugin changes.');
+      expect(transcript).not.toContain('Note: This plugin consumes your quota.');
     });
     // Installing closes the panel so the success notice / reload tip is visible.
     await vi.waitFor(() => {
@@ -4332,6 +4874,67 @@ command = "vim"
     expect(driver.state.appState.thinkingEffort).toBe('on');
   });
 
+  it('uses the effective effort returned after a model-switch fallback', async () => {
+    let switched = false;
+    const session = makeSession({
+      getStatus: vi.fn(async () => ({
+        model: switched ? 'turbo' : 'k2',
+        thinkingEffort: switched ? 'mid' : 'ultra',
+        permission: 'manual',
+        planMode: false,
+        contextTokens: 0,
+        maxContextTokens: 100,
+        contextUsage: 0,
+      })),
+      setModel: vi.fn(async () => {
+        switched = true;
+      }),
+    });
+    const setConfig = vi.fn(async () => ({ providers: {} }));
+    const { driver } = await makeDriver(session, {
+      getConfig: vi.fn(async () => ({
+        models: {
+          k2: {
+            provider: 'managed:kimi-code',
+            model: 'kimi-k2',
+            maxContextSize: 100,
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'high', 'ultra'],
+            defaultEffort: 'ultra',
+          },
+          turbo: {
+            provider: 'managed:kimi-code',
+            model: 'kimi-turbo',
+            maxContextSize: 100,
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'mid', 'high'],
+            defaultEffort: 'mid',
+          },
+        },
+        defaultModel: 'k2',
+        thinking: { enabled: true, effort: 'ultra' },
+      })),
+      setConfig,
+    });
+
+    driver.handleUserInput('/model turbo');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(TabbedModelSelectorComponent);
+    });
+    (driver.state.editorContainer.children[0] as TabbedModelSelectorComponent).handleInput('\r');
+
+    await vi.waitFor(() => {
+      expect(setConfig).toHaveBeenCalledWith({
+        defaultModel: 'turbo',
+        thinking: { enabled: true, effort: 'mid' },
+      });
+    });
+    expect(driver.state.appState.model).toBe('turbo');
+    expect(driver.state.appState.thinkingEffort).toBe('mid');
+    expect(renderTranscript(driver)).toContain('Switched to kimi-turbo with thinking mid.');
+  });
+
   it('persists /model selection even when runtime state is unchanged', async () => {
     const session = makeSession();
     const setConfig = vi.fn(async () => ({ providers: {} }));
@@ -4368,6 +4971,116 @@ command = "vim"
     });
     expect(session.setModel).not.toHaveBeenCalled();
     expect(session.setThinking).not.toHaveBeenCalled();
+  });
+
+  it('does not write config when re-confirming the current effort in the picker', async () => {
+    const session = makeSession({
+      getStatus: vi.fn(async () => ({
+        model: 'k2',
+        thinkingEffort: 'high',
+        permission: 'manual',
+        planMode: false,
+        contextTokens: 0,
+        maxContextTokens: 100,
+        contextUsage: 0,
+      })),
+    });
+    const setConfig = vi.fn(async () => ({ providers: {} }));
+    const { driver } = await makeDriver(session, {
+      getConfig: vi.fn(async () => ({
+        models: {
+          k2: {
+            provider: 'managed:kimi-code',
+            model: 'kimi-k2',
+            maxContextSize: 100,
+            displayName: 'Kimi K2',
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
+          },
+        },
+        defaultModel: 'k2',
+        // No persisted effort: re-confirming the shown level must not turn the
+        // runtime default into a stored preference.
+        thinking: { enabled: true },
+      })),
+      setConfig,
+    });
+
+    driver.handleUserInput('/effort');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(EffortSelectorComponent);
+    });
+    (driver.state.editorContainer.children[0] as EffortSelectorComponent).handleInput('\r');
+
+    await vi.waitFor(() => {
+      expect(renderTranscript(driver)).toContain('Already using Kimi K2 with thinking high.');
+    });
+    expect(setConfig).not.toHaveBeenCalled();
+    expect(session.setThinking).not.toHaveBeenCalled();
+  });
+
+  it('persists only the model when a switch keeps the same effort', async () => {
+    let switched = false;
+    const session = makeSession({
+      getStatus: vi.fn(async () => ({
+        model: switched ? 'turbo' : 'k2',
+        thinkingEffort: 'high',
+        permission: 'manual',
+        planMode: false,
+        contextTokens: 0,
+        maxContextTokens: 100,
+        contextUsage: 0,
+      })),
+      setModel: vi.fn(async () => {
+        switched = true;
+      }),
+    });
+    const setConfig = vi.fn(async () => ({ providers: {} }));
+    const { driver } = await makeDriver(session, {
+      getConfig: vi.fn(async () => ({
+        models: {
+          k2: {
+            provider: 'managed:kimi-code',
+            model: 'kimi-k2',
+            maxContextSize: 100,
+            displayName: 'Kimi K2',
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
+          },
+          turbo: {
+            provider: 'managed:kimi-code',
+            model: 'kimi-turbo',
+            maxContextSize: 100,
+            displayName: 'Turbo',
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
+          },
+        },
+        defaultModel: 'k2',
+        thinking: { enabled: true, effort: 'high' },
+      })),
+      setConfig,
+    });
+
+    driver.handleUserInput('/model turbo');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(TabbedModelSelectorComponent);
+    });
+    (driver.state.editorContainer.children[0] as TabbedModelSelectorComponent).handleInput('\r');
+
+    // The effort matches the value shown when the picker opened, so the patch
+    // carries no effort key; the stored preference stays as-is via the merge.
+    await vi.waitFor(() => {
+      expect(setConfig).toHaveBeenCalledWith({
+        defaultModel: 'turbo',
+        thinking: { enabled: true },
+      });
+    });
   });
 
   it('refreshes only OAuth provider models before opening /model picker', async () => {
@@ -4615,6 +5328,65 @@ command = "vim"
     expect(driver.streamingUI.hasActiveThinkingComponent()).toBe(false);
   });
 
+  it('does not create a thinking component for whitespace-only thinking deltas', async () => {
+    const { driver } = await makeDriver();
+    driver.state.appState.streamingPhase = 'waiting';
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'thinking.delta',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        delta: ' ',
+      } as Event,
+      vi.fn(),
+    );
+    driver.streamingUI.flushNow();
+
+    // Nothing to render: no component, and the phase is not hijacked into thinking.
+    expect(driver.streamingUI.hasActiveThinkingComponent()).toBe(false);
+    expect(driver.state.appState.streamingPhase).toBe('waiting');
+
+    // Real thinking text after the whitespace still starts thinking normally.
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'thinking.delta',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        delta: 'actual reasoning',
+      } as Event,
+      vi.fn(),
+    );
+    driver.streamingUI.flushNow();
+
+    expect(driver.state.appState.streamingPhase).toBe('thinking');
+    expect(driver.streamingUI.hasActiveThinkingComponent()).toBe(true);
+    expect(stripSgr(renderTranscript(driver))).toContain('actual reasoning');
+  });
+
+  it('does not create a thinking component for whitespace-only thinking on session replay', async () => {
+    const { driver } = await makeDriver();
+
+    // Session replay flushes stored thinking verbatim through onThinkingUpdate
+    // (see SessionReplayRenderer.flushAssistant), so a persisted whitespace-only
+    // think part must not become a bare bullet line.
+    driver.streamingUI.onThinkingUpdate(' ');
+    driver.streamingUI.onThinkingEnd();
+
+    expect(driver.streamingUI.hasActiveThinkingComponent()).toBe(false);
+    expect(
+      driver.state.transcriptContainer.children.filter(
+        (child) => child instanceof ThinkingComponent,
+      ),
+    ).toHaveLength(0);
+
+    // Real stored thinking still replays normally.
+    driver.streamingUI.onThinkingUpdate('visible reasoning');
+    driver.streamingUI.onThinkingEnd();
+
+    expect(stripSgr(renderTranscript(driver))).toContain('visible reasoning');
+  });
+
   it('keeps the waiting moon spinner while reasoning streams only empty (encrypted) thinking deltas', async () => {
     const { driver } = await makeDriver();
 
@@ -4820,16 +5592,20 @@ describe('/model status displayName override', () => {
 });
 
 describe('/effort support_efforts override', () => {
-  it('rejects efforts hidden by support_efforts override', async () => {
+  it('warns and applies efforts hidden by an Anthropic support_efforts override', async () => {
     const session = makeSession();
     const { driver } = await makeDriver(session, {
       getConfig: vi.fn(async () => ({
+        providers: {
+          compatible: { type: 'kimi', apiKey: 'test-key' },
+        },
         models: {
           k2: {
-            provider: 'managed:kimi-code',
-            model: 'kimi-k2',
+            provider: 'compatible',
+            model: 'compatible-model',
+            protocol: 'anthropic',
             maxContextSize: 100,
-            displayName: 'Kimi K2',
+            displayName: 'Compatible Model',
             capabilities: ['thinking'],
             supportEfforts: ['low', 'high', 'max'],
             overrides: { supportEfforts: ['low', 'high'] },
@@ -4843,8 +5619,271 @@ describe('/effort support_efforts override', () => {
     driver.handleUserInput('/effort max');
 
     await vi.waitFor(() => {
-      expect(renderTranscript(driver)).toContain('Unsupported thinking effort "max" for k2. Available: off, low, high');
+      expect(session.setThinking).toHaveBeenCalledWith('max');
     });
-    expect(renderTranscript(driver)).not.toContain('Switched to Kimi K2 with thinking max.');
+    await vi.waitFor(() => {
+      expect(renderTranscript(driver)).toContain('Thinking set to max.');
+    });
+    const transcript = renderTranscript(driver).replaceAll(/\s+/g, ' ');
+    expect(transcript).toContain(
+      'Thinking effort "max" is not listed for k2 (known: low, high). Sending "max" unchanged; the configured provider will validate it.',
+    );
+    expect(transcript).toContain('Thinking set to max.');
+  });
+
+  it('offers the latest Opus efforts for an unknown Claude-marked Anthropic-compatible model', async () => {
+    const { driver } = await makeDriver(makeSession(), {
+      getConfig: vi.fn(async () => ({
+        providers: {
+          compatible: { type: 'anthropic', apiKey: 'test-key' },
+        },
+        models: {
+          k2: {
+            provider: 'compatible',
+            model: 'compatible-claude-model',
+            maxContextSize: 100,
+          },
+        },
+        defaultModel: 'k2',
+      })),
+    });
+
+    driver.handleUserInput('/effort');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(EffortSelectorComponent);
+    });
+    const picker = driver.state.editorContainer.children[0] as EffortSelectorComponent;
+    expect(picker.render(80).join('\n')).toContain('Max');
+  });
+
+  it('offers no fallback efforts for a clearly non-Claude Anthropic-compatible model', async () => {
+    const { driver } = await makeDriver(makeSession(), {
+      getConfig: vi.fn(async () => ({
+        providers: {
+          compatible: { type: 'anthropic', apiKey: 'test-key' },
+        },
+        models: {
+          k2: {
+            provider: 'compatible',
+            model: 'compatible-model',
+            maxContextSize: 100,
+          },
+        },
+        defaultModel: 'k2',
+      })),
+    });
+
+    driver.handleUserInput('/effort');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(EffortSelectorComponent);
+    });
+    const picker = driver.state.editorContainer.children[0] as EffortSelectorComponent;
+    expect(picker.render(80).join('\n')).not.toContain('Max');
+  });
+
+  it('offers no fallback efforts for an unknown model on a Kimi provider using the Anthropic protocol', async () => {
+    const { driver } = await makeDriver(makeSession(), {
+      getConfig: vi.fn(async () => ({
+        providers: {
+          compatible: { type: 'kimi', apiKey: 'test-key' },
+        },
+        models: {
+          k2: {
+            provider: 'compatible',
+            model: 'compatible-model',
+            protocol: 'anthropic',
+            maxContextSize: 100,
+          },
+        },
+        defaultModel: 'k2',
+      })),
+    });
+
+    driver.handleUserInput('/effort');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(EffortSelectorComponent);
+    });
+    const picker = driver.state.editorContainer.children[0] as EffortSelectorComponent;
+    expect(picker.render(80).join('\n')).not.toContain('Max');
+  });
+
+  it('offers the latest Opus efforts for a flat providerless Claude-marked Anthropic model', async () => {
+    const { driver } = await makeDriver(makeSession(), {
+      getConfig: vi.fn(async () => ({
+        providers: {},
+        models: {
+          // v2 flat model shape: no named provider, inline endpoint + protocol.
+          k2: {
+            model: 'compatible-claude-model',
+            baseUrl: 'https://anthropic.example.test',
+            protocol: 'anthropic',
+            maxContextSize: 100,
+          },
+        },
+        defaultModel: 'k2',
+      })),
+    });
+
+    driver.handleUserInput('/effort');
+
+    await vi.waitFor(() => {
+      expect(driver.state.editorContainer.children[0]).toBeInstanceOf(EffortSelectorComponent);
+    });
+    const picker = driver.state.editorContainer.children[0] as EffortSelectorComponent;
+    expect(picker.render(80).join('\n')).toContain('Max');
+  });
+
+  it('keeps rejecting efforts hidden by a Kimi support_efforts override', async () => {
+    const session = makeSession();
+    const { driver } = await makeDriver(session, {
+      getConfig: vi.fn(async () => ({
+        providers: {
+          kimi: { type: 'kimi', apiKey: 'test-key' },
+        },
+        models: {
+          k2: {
+            provider: 'kimi',
+            model: 'kimi-model',
+            maxContextSize: 100,
+            capabilities: ['thinking'],
+            supportEfforts: ['low', 'high'],
+          },
+        },
+        defaultModel: 'k2',
+        thinking: { enabled: true, effort: 'low' },
+      })),
+    });
+
+    driver.handleUserInput('/effort max');
+
+    await vi.waitFor(() => {
+      expect(renderTranscript(driver)).toContain(
+        'Unsupported thinking effort "max" for k2. Available: off, low, high',
+      );
+    });
+    expect(session.setThinking).not.toHaveBeenCalled();
+  });
+});
+
+describe('transcript step and assistant folding', () => {
+  function driveSteps(driver: MessageDriver, cycles: number): void {
+    for (let i = 0; i < cycles; i++) {
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'assistant.delta',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          turnId: 1,
+          delta: `msg-${i} `,
+        } as Event,
+        vi.fn(),
+      );
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'tool.call.started',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          turnId: 1,
+          toolCallId: `call_${i}`,
+          name: 'Bash',
+          args: { command: 'ls' },
+        } as Event,
+        vi.fn(),
+      );
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'tool.result',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          turnId: 1,
+          toolCallId: `call_${i}`,
+          output: 'ok',
+          isError: undefined,
+        } as Event,
+        vi.fn(),
+      );
+    }
+  }
+
+  it('folds the oldest assistant messages and steps beyond their per-turn caps', async () => {
+    const { driver } = await makeDriver();
+    driver.handleUserInput('fold me');
+
+    const cycles = Math.max(TRANSCRIPT_KEEP_RECENT_ASSISTANT, TRANSCRIPT_KEEP_RECENT_STEPS) + 7;
+    driveSteps(driver, cycles);
+
+    const children = driver.state.transcriptContainer.children;
+    const assistantCount = children.filter(
+      (child) => child instanceof AssistantMessageComponent,
+    ).length;
+    const toolCount = children.filter((child) => child instanceof ToolCallComponent).length;
+    expect(assistantCount).toBe(TRANSCRIPT_KEEP_RECENT_ASSISTANT);
+    expect(toolCount).toBe(TRANSCRIPT_KEEP_RECENT_STEPS);
+
+    const summaries = children.filter((child) => child instanceof StepSummaryComponent);
+    expect(summaries).toHaveLength(1);
+    const summaryText = stripSgr(summaries[0]!.render(120).join('\n'));
+    expect(summaryText).toContain(`call ${cycles - TRANSCRIPT_KEEP_RECENT_STEPS} tools`);
+    expect(summaryText).toContain(`${cycles - TRANSCRIPT_KEEP_RECENT_ASSISTANT} messages`);
+
+    // Folding drops mounted components only; every transcript entry is kept.
+    const assistantEntries = driver.state.transcriptEntries.filter(
+      (entry) => entry.kind === 'assistant',
+    );
+    expect(assistantEntries).toHaveLength(cycles);
+  });
+
+  it('does not fold a turn within the caps', async () => {
+    const { driver } = await makeDriver();
+    driver.handleUserInput('small turn');
+    driveSteps(driver, 3);
+
+    const children = driver.state.transcriptContainer.children;
+    expect(children.filter((child) => child instanceof AssistantMessageComponent)).toHaveLength(3);
+    expect(children.filter((child) => child instanceof ToolCallComponent)).toHaveLength(3);
+    expect(children.filter((child) => child instanceof StepSummaryComponent)).toHaveLength(0);
+  });
+
+  it('folds a completed turn down to its conclusion tail on turn end', async () => {
+    const { driver } = await makeDriver();
+    driver.handleUserInput('round one');
+    const cycles = 10;
+    driveSteps(driver, cycles);
+
+    // Below the active-turn caps, nothing folds while the turn is live.
+    let children = driver.state.transcriptContainer.children;
+    expect(
+      children.filter((child) => child instanceof AssistantMessageComponent),
+    ).toHaveLength(cycles);
+
+    driver.sessionEventHandler.handleEvent(
+      {
+        type: 'turn.ended',
+        agentId: 'main',
+        sessionId: 'ses-1',
+        turnId: 1,
+        reason: 'completed',
+      } as Event,
+      vi.fn(),
+    );
+
+    children = driver.state.transcriptContainer.children;
+    const assistants = children.filter((child) => child instanceof AssistantMessageComponent);
+    expect(assistants).toHaveLength(TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED);
+
+    const summaries = children.filter((child) => child instanceof StepSummaryComponent);
+    expect(summaries).toHaveLength(1);
+    const summaryText = stripSgr(summaries[0]!.render(120).join('\n'));
+    expect(summaryText).toContain(`${cycles - TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED} messages`);
+
+    // Steps below the step cap are untouched by the completed-turn fold.
+    expect(children.filter((child) => child instanceof ToolCallComponent)).toHaveLength(cycles);
+
+    // The conclusion stays mounted.
+    const lastAssistant = assistants.at(-1)!;
+    expect(stripSgr(lastAssistant.render(120).join('\n'))).toContain(`msg-${cycles - 1}`);
   });
 });
