@@ -5,7 +5,7 @@
  * Run: pnpm -C apps/kimi-code exec vitest run test/cli/options.test.ts
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createProgram } from '#/cli/commands';
 import type { CLIOptions } from '#/cli/options';
@@ -501,14 +501,14 @@ describe('CLI options parsing', () => {
       expect(validateOptions(parse(['--agent-file', 'a.md']), {}).uiMode).toBe('shell');
     });
 
-    it('accepts the flags in prompt mode without the v2 engine flag', () => {
+    it('accepts the flags in prompt mode', () => {
       const opts = parse(['-p', 'hi', '--agent-file', 'a.md']);
       expect(validateOptions(opts, {}).uiMode).toBe('print');
     });
 
-    it('accepts the flags in prompt mode with the v2 engine flag', () => {
+    it('accepts --agent in prompt mode', () => {
       const opts = parse(['-p', 'hi', '--agent', 'reviewer']);
-      expect(validateOptions(opts, { KIMI_CODE_EXPERIMENTAL_FLAG: '1' }).uiMode).toBe('print');
+      expect(validateOptions(opts, {}).uiMode).toBe('print');
     });
   });
 
@@ -524,7 +524,7 @@ describe('CLI options parsing', () => {
 
   describe('sub-commands', () => {
     it('routes upgrade without calling the main action', () => {
-      let upgradeCalls = 0;
+      const upgradeYes: boolean[] = [];
       const program = createProgram(
         '0.0.0',
         () => {
@@ -532,8 +532,8 @@ describe('CLI options parsing', () => {
         },
         () => {},
         () => {},
-        () => {
-          upgradeCalls += 1;
+        (yes) => {
+          upgradeYes.push(yes);
         },
       );
       program.exitOverride();
@@ -544,11 +544,11 @@ describe('CLI options parsing', () => {
 
       program.parse(['node', 'kimi', 'upgrade']);
 
-      expect(upgradeCalls).toBe(1);
+      expect(upgradeYes).toEqual([false]);
     });
 
     it('routes update alias to the upgrade handler', () => {
-      let upgradeCalls = 0;
+      const upgradeYes: boolean[] = [];
       const program = createProgram(
         '0.0.0',
         () => {
@@ -556,8 +556,8 @@ describe('CLI options parsing', () => {
         },
         () => {},
         () => {},
-        () => {
-          upgradeCalls += 1;
+        (yes) => {
+          upgradeYes.push(yes);
         },
       );
       program.exitOverride();
@@ -566,9 +566,9 @@ describe('CLI options parsing', () => {
         writeErr: () => {},
       });
 
-      program.parse(['node', 'kimi', 'update']);
+      program.parse(['node', 'kimi', 'update', '-y']);
 
-      expect(upgradeCalls).toBe(1);
+      expect(upgradeYes).toEqual([true]);
     });
 
     it('registers the visible sub-commands', () => {
@@ -578,43 +578,26 @@ describe('CLI options parsing', () => {
         () => {},
       );
       const commandNames: string[] = program.commands
-        .filter((command) => !command.name().startsWith('__'))
+        .filter((command) => !command.name().startsWith('__') && !(command as unknown as { _hidden?: boolean })._hidden)
         .map((command) => command.name());
       expect(commandNames).toEqual([
         'export',
+        'fork',
         'provider',
+        'session',
         'acp',
         'web',
         'server',
+        'rc',
         'login',
         'doctor',
         'vis',
+        'install-desktop',
         'migrate',
         'upgrade',
       ]);
     });
 
-    it('registers acp-v2 when the experimental flag is enabled', () => {
-      const original = process.env['KIMI_CODE_EXPERIMENTAL_ACP_V2'];
-      process.env['KIMI_CODE_EXPERIMENTAL_ACP_V2'] = '1';
-      try {
-        const program = createProgram(
-          '0.0.0',
-          () => {},
-          () => {},
-        );
-        const commandNames: string[] = program.commands
-          .filter((command) => !command.name().startsWith('__'))
-          .map((command) => command.name());
-        expect(commandNames).toContain('acp-v2');
-      } finally {
-        if (original === undefined) {
-          delete process.env['KIMI_CODE_EXPERIMENTAL_ACP_V2'];
-        } else {
-          process.env['KIMI_CODE_EXPERIMENTAL_ACP_V2'] = original;
-        }
-      }
-    });
   });
 
   describe('rejected flags', () => {
