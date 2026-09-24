@@ -92,37 +92,31 @@ describe('tool-result registry', () => {
     expect(out).toContain('bar');
   });
 
-  it('Grep glance lists path samples below the chip', () => {
+  it('Grep renders no body when collapsed (header chip carries the count)', () => {
     const renderer = pickResultRenderer('Grep');
-    const out = strip(
-      joinRender(
-        renderer(
-          call('Grep', { pattern: 'foo' }),
-          result('src/a.ts\nsrc/b.ts\nsrc/c.ts\nsrc/d.ts\nsrc/e.ts'),
-          ctx,
-        ),
+    const out = joinRender(
+      renderer(
+        call('Grep', { pattern: 'foo' }),
+        result('src/a.ts\nsrc/b.ts\nsrc/c.ts\nsrc/d.ts\nsrc/e.ts'),
+        ctx,
       ),
     );
-    expect(out).toContain('src/a.ts');
-    expect(out).toContain('src/b.ts');
-    expect(out).toContain('src/c.ts');
-    expect(out).toContain('+2 more');
-    expect(out).not.toContain('src/d.ts');
+    expect(out.trim()).toBe('');
   });
 
-  it('Grep glance strips trailing :line:text in content mode', () => {
+  it('Grep expands to the raw output when expanded', () => {
     const renderer = pickResultRenderer('Grep');
     const out = strip(
       joinRender(
         renderer(
           call('Grep', { pattern: 'foo' }),
           result('src/a.ts:42:    foo()\nsrc/b.ts:7:foo'),
-          ctx,
+          expandedCtx,
         ),
       ),
     );
-    expect(out).toContain('src/a.ts:42');
-    expect(out).not.toContain('foo()');
+    expect(out).toContain('src/a.ts:42:    foo()');
+    expect(out).toContain('src/b.ts:7:foo');
   });
 
   it('Grep with empty result renders nothing in collapsed state', () => {
@@ -131,17 +125,25 @@ describe('tool-result registry', () => {
     expect(out.trim()).toBe('');
   });
 
-  it('Glob glance lists path samples', () => {
+  it('Glob renders no body when collapsed (header chip carries the count)', () => {
+    const renderer = pickResultRenderer('Glob');
+    const out = joinRender(
+      renderer(call('Glob', { pattern: '**/*.ts' }), result('a.ts\nb.ts\nc.ts\nd.ts'), ctx),
+    );
+    expect(out.trim()).toBe('');
+  });
+
+  it('Glob expands to the raw file list when expanded', () => {
     const renderer = pickResultRenderer('Glob');
     const out = strip(
       joinRender(
-        renderer(call('Glob', { pattern: '**/*.ts' }), result('a.ts\nb.ts\nc.ts\nd.ts'), ctx),
+        renderer(call('Glob', { pattern: '**/*.ts' }), result('a.ts\nb.ts\nc.ts\nd.ts'), expandedCtx),
       ),
     );
     expect(out).toContain('a.ts');
     expect(out).toContain('b.ts');
     expect(out).toContain('c.ts');
-    expect(out).toContain('+1 more');
+    expect(out).toContain('d.ts');
   });
 
   it('FetchURL renders no body when collapsed', () => {

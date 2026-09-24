@@ -92,7 +92,10 @@ import {
 } from './components/messages/status-message';
 import { StepSummaryComponent } from './components/messages/step-summary';
 import { ThinkingComponent } from './components/messages/thinking';
-import { ToolCallComponent } from './components/messages/tool-call';
+import {
+  isToolOutputExpandedByDefault,
+  ToolCallComponent,
+} from './components/messages/tool-call';
 import {
   ReplayTurnBoundaryComponent,
   UserMessageComponent,
@@ -1976,7 +1979,12 @@ export class KimiTUI {
             this.state.ui,
             this.state.appState.workDir,
           );
-          if (this.state.toolOutputExpanded) tc.setExpanded(true);
+          if (
+            this.state.toolOutputExpanded &&
+            isToolOutputExpandedByDefault(entry.toolCallData.name)
+          ) {
+            tc.setExpanded(true);
+          }
           return tc;
         }
         if (entry.backgroundAgentStatus !== undefined) {

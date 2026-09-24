@@ -2337,3 +2337,16 @@ function formatActivityLine(
   const keyArg = extractKeyArgument(toolName, args, workspaceDir);
   return keyArg ? `${verb} ${toolName} (${keyArg})` : `${verb} ${toolName}`;
 }
+
+/**
+ * Tools whose raw output is high-volume and low-signal for the transcript
+ * headline. They start collapsed even when the user has the global
+ * "expand tool output" preference enabled; Write/Edit and similar
+ * actionable tools still open by default. Users can still expand these
+ * manually with Ctrl+O.
+ */
+const TOOLS_COLLAPSED_BY_DEFAULT = new Set(['Read', 'Grep', 'Glob']);
+
+export function isToolOutputExpandedByDefault(toolName: string): boolean {
+  return !TOOLS_COLLAPSED_BY_DEFAULT.has(toolName);
+}

@@ -6,7 +6,7 @@ import { currentWorkingTip } from '../components/chrome/working-tips';
 import { CompactionComponent } from '../components/dialogs/compaction';
 import { ReadGroupComponent } from '../components/messages/read-group';
 import { ThinkingComponent } from '../components/messages/thinking';
-import { ToolCallComponent } from '../components/messages/tool-call';
+import { isToolOutputExpandedByDefault, ToolCallComponent } from '../components/messages/tool-call';
 import { STREAMING_UI_FLUSH_MS } from '../constant/streaming';
 import { hasDispose } from '../utils/component-capabilities';
 import { appendStreamingArgsPreview, parseStreamingArgs } from '../utils/event-payload';
@@ -668,7 +668,9 @@ export class StreamingUIController {
       state.ui,
       state.appState.workDir,
     );
-    if (state.toolOutputExpanded) tc.setExpanded(true);
+    if (state.toolOutputExpanded && isToolOutputExpandedByDefault(toolCall.name)) {
+      tc.setExpanded(true);
+    }
     this._pendingToolComponents.set(toolCall.id, tc);
 
     if (toolCall.name !== 'Agent') this._pendingAgentGroup = null;
@@ -713,7 +715,9 @@ export class StreamingUIController {
         state.ui,
         state.appState.workDir,
       );
-      if (state.toolOutputExpanded) completed.setExpanded(true);
+      if (state.toolOutputExpanded && isToolOutputExpandedByDefault(matchedCall.name)) {
+        completed.setExpanded(true);
+      }
       state.transcriptContainer.addChild(completed);
       state.ui.requestRender();
     }

@@ -2,7 +2,10 @@ import { visibleWidth, type TUI } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ToolCallComponent } from '#/tui/components/messages/tool-call';
+import {
+  isToolOutputExpandedByDefault,
+  ToolCallComponent,
+} from '#/tui/components/messages/tool-call';
 import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { darkColors } from '#/tui/theme/colors';
 
@@ -1932,5 +1935,19 @@ describe('ToolCallComponent', () => {
     } finally {
       stderr.restore();
     }
+  });
+});
+
+describe('isToolOutputExpandedByDefault', () => {
+  it('starts file-query tools collapsed to keep the transcript compact', () => {
+    expect(isToolOutputExpandedByDefault('Read')).toBe(false);
+    expect(isToolOutputExpandedByDefault('Grep')).toBe(false);
+    expect(isToolOutputExpandedByDefault('Glob')).toBe(false);
+  });
+
+  it('starts actionable tools expanded so their contents remain visible', () => {
+    expect(isToolOutputExpandedByDefault('Write')).toBe(true);
+    expect(isToolOutputExpandedByDefault('Edit')).toBe(true);
+    expect(isToolOutputExpandedByDefault('Bash')).toBe(true);
   });
 });
