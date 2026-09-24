@@ -35,6 +35,7 @@ reports/
 
 # Agent scratch / throwaway files - do not commit
 .tmp/
+learning-notes/
 HANDOVER*.md
 HANDOFF*.md
 handoff.md

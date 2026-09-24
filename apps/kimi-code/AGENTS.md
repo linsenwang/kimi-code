@@ -69,3 +69,7 @@ The theme apply/switch mechanics live in the `write-tui` skill. The following ru
 - Optional object properties do not need to additionally allow `undefined` in the type.
 - Internal methods with only a single parameter should not be turned into options objects just for stylistic uniformity.
 - Except for a package's own `index.ts`, other `index.ts` files should prefer `export * from './module'`.
+
+## Build Verification
+
+- After making changes to `src/` and re-compiling (`pnpm build` or similar), always verify the result works by running the `k` alias: `node /Users/yangqian/Downloads/kimi-code/apps/kimi-code/dist/main.mjs --version`. For TUI changes, also test that `k` (with `--auto` flag) starts up without `ReferenceError` or other startup crashes.
