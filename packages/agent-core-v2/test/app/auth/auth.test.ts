@@ -1383,6 +1383,14 @@ describe('WebSearchProviderService', () => {
             url: 'https://example.com/fallback',
             snippet: 'Only snippet',
           },
+          {
+            title: 'Null text',
+            url: 'https://example.com/null',
+            snippet: null,
+            summary: null,
+            site_name: null,
+            date: null,
+          },
         ],
       }),
     });
@@ -1405,6 +1413,11 @@ describe('WebSearchProviderService', () => {
         title: 'Snippet fallback',
         url: 'https://example.com/fallback',
         snippet: 'Only snippet',
+      },
+      {
+        title: 'Null text',
+        url: 'https://example.com/null',
+        snippet: '',
       },
     ]);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];

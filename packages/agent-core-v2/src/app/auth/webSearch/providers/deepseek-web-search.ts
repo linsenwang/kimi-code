@@ -15,12 +15,12 @@ export interface DeepSeekWebSearchProviderOptions {
 }
 
 interface DeepSeekSearchResult {
-  title?: string;
-  url?: string;
-  snippet?: string;
-  summary?: string;
-  site_name?: string;
-  date?: string;
+  title?: string | null;
+  url?: string | null;
+  snippet?: string | null;
+  summary?: string | null;
+  site_name?: string | null;
+  date?: string | null;
 }
 
 interface DeepSeekSearchResponse {
@@ -119,8 +119,8 @@ export class DeepSeekWebSearchProvider implements WebSearchProvider {
   }
 }
 
-function nonEmpty(value: string | undefined): string | undefined {
-  return value !== undefined && value.length > 0 ? value : undefined;
+function nonEmpty(value: string | null | undefined): string | undefined {
+  return value !== null && value !== undefined && value.length > 0 ? value : undefined;
 }
 
 async function safeReadText(response: Response): Promise<string> {
