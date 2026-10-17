@@ -13,6 +13,7 @@ import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { ITelemetryService, noopTelemetryService } from '#/app/telemetry/telemetry';
 import { IProviderService, type ProviderConfig } from '#/llm-adapter/provider/provider';
+import { DeepSeekFetchURLProvider } from '#/app/web/providers/deepseek-fetch-url';
 import { LocalFetchURLProvider } from '#/app/web/providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from '#/app/web/providers/moonshot-fetch-url';
 import { IWebFetchService } from '#/app/web/web';
@@ -33,6 +34,7 @@ describe('WebFetchService', () => {
   let providers: Record<string, ProviderConfig>;
   let servicesConfig: ServicesConfig | undefined;
   let identitySlug: string | undefined;
+  let env: Record<string, string | undefined>;
   let resolveTokenProvider: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -40,6 +42,7 @@ describe('WebFetchService', () => {
     providers = {};
     servicesConfig = undefined;
     identitySlug = undefined;
+    env = {};
     resolveTokenProvider = vi
       .fn()
       .mockReturnValue({ getAccessToken: async () => 'access-token' });
@@ -61,6 +64,7 @@ describe('WebFetchService', () => {
         });
         reg.definePartialInstance(IBootstrapService, {
           args: { requestHeaders: HOST_HEADERS },
+          getEnv: ((name: string) => env[name]) as IBootstrapService['getEnv'],
         });
         reg.definePartialInstance(IConfigService, {
           get: ((domain: string) =>
@@ -174,6 +178,34 @@ describe('WebFetchService', () => {
     expect(headers['User-Agent']).toBe('kimi-code-cli/test');
     expect(headers['X-Msh-Device-Id']).toBe('device-test');
     expect(headers['X-Config']).toBe('1');
+  });
+
+  it('builds a DeepSeek fetcher from the services.moonshot_fetch protocol', async () => {
+    servicesConfig = {
+      moonshotFetch: {
+        baseUrl: 'https://api.deepseek.com/v1/tools/fetch',
+        apiKey: 'deepseek-key',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+        protocol: 'deepseek',
+      },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ title: 'Page', content: '# Page body' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(fetcher()).toBeInstanceOf(DeepSeekFetchURLProvider);
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+    const result = await fetcher().fetch('https://example.com/page');
+
+    expect(result).toEqual({ content: '# Page body', kind: 'extracted' });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.deepseek.com/v1/tools/fetch');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer deepseek-key');
+    expect(headers['Accept']).toBe('application/json');
+    expect(JSON.parse(init.body as string)).toEqual({ url: 'https://example.com/page' });
   });
 
   it('sends the configured identity to a services-config endpoint', async () => {

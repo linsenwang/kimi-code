@@ -501,8 +501,10 @@ Both values must be positive integers. A call's `max_chars` overrides the defaul
 | --- | --- | --- | --- |
 | `base_url` | `string` | No | Service API URL |
 | `api_key` | `string` | No | API key |
+| `api_key_env` | `string` | No | Name of an environment variable that holds the API key; `api_key` takes priority when both are set |
 | `oauth` | `table` | No | OAuth credential reference, same structure as `providers.*.oauth` |
 | `custom_headers` | `table<string, string>` | No | Custom HTTP headers attached to each request |
+| `protocol` | `string` | No | Service wire protocol: `moonshot` (default) or `deepseek` |
 
 `base_url` and `api_key` can also come from environment variables, which take priority over the config file: `KIMI_WEB_SEARCH_BASE_URL` / `KIMI_WEB_SEARCH_API_KEY` for `moonshot_search`, and `KIMI_WEB_FETCH_BASE_URL` / `KIMI_WEB_FETCH_API_KEY` for `moonshot_fetch`. An env base URL defines a separate service endpoint, so the persisted API key, OAuth reference, and custom headers are not forwarded to it; set the matching env API key when that endpoint requires authentication. An env API key without an env base URL keeps the configured endpoint and custom headers but replaces both configured credential forms. Setting the base URL and API key through env without any config section also enables the service.
 
@@ -514,6 +516,20 @@ api_key = "sk-xxx"
 [services.moonshot_fetch]
 base_url = "https://api.moonshot.cn/v1/fetch"
 api_key = "sk-xxx"
+```
+
+To use DeepSeek's Search and Fetch APIs, set `protocol = "deepseek"` on each service:
+
+```toml
+[services.moonshot_search]
+base_url = "https://api.deepseek.com/v1/tools/search"
+api_key_env = "DEEPSEEK_API_KEY"
+protocol = "deepseek"
+
+[services.moonshot_fetch]
+base_url = "https://api.deepseek.com/v1/tools/fetch"
+api_key_env = "DEEPSEEK_API_KEY"
+protocol = "deepseek"
 ```
 
 ## `permission`

@@ -12,7 +12,8 @@ import { IConfigService } from '#/app/config/config';
 import { IProviderService, type ProviderConfig } from '#/llm-adapter/provider/provider';
 import { isOAuthCatalogVendor } from '#/llm-adapter/provider/provider-definition';
 
-import { SERVICES_SECTION, type ServicesConfig } from '../configSection';
+import { resolveServiceApiKey, SERVICES_SECTION, type ServicesConfig } from '../configSection';
+import { DeepSeekWebSearchProvider } from './providers/deepseek-web-search';
 import { MoonshotWebSearchProvider } from './providers/moonshot-web-search';
 import type { WebSearchProvider } from '#/agent/tools/web-search/web-search';
 import { IWebSearchProviderService } from './webSearch';
@@ -61,16 +62,19 @@ export class WebSearchProviderService implements IWebSearchProviderService {
     const search = this.configuredSearch();
     if (search === undefined) return undefined;
     const tokenProvider =
-      search.oauth === undefined
+      search.protocol === 'deepseek' || search.oauth === undefined
         ? undefined
         : this.oauth.resolveTokenProvider(KIMI_CODE_PROVIDER_NAME, search.oauth);
-    return new MoonshotWebSearchProvider({
+    const options = {
       baseUrl: search.baseUrl,
       tokenProvider,
-      apiKey: nonEmptyString(search.apiKey),
+      apiKey: resolveServiceApiKey(search, (name) => this.bootstrap.getEnv(name)),
       defaultHeaders: { ...this.identity.current().requestHeaders },
       customHeaders: search.customHeaders,
-    });
+    };
+    return search.protocol === 'deepseek'
+      ? new DeepSeekWebSearchProvider(options)
+      : new MoonshotWebSearchProvider(options);
   }
 
   private fromManagedOAuth(): WebSearchProvider | undefined {
@@ -85,11 +89,6 @@ export class WebSearchProviderService implements IWebSearchProviderService {
       customHeaders: provider.customHeaders,
     });
   }
-}
-
-function nonEmptyString(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
 registerScopedService(

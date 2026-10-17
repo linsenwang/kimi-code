@@ -33,14 +33,34 @@ const OAuthRefSchema = z.object({
 
 type _AssertOAuthRef = AssertExact<Equal<z.infer<typeof OAuthRefSchema>, OAuthRef>>;
 
+export const ServiceProtocolSchema = z.enum(['moonshot', 'deepseek']);
+
 export const MoonshotServiceConfigSchema = z.object({
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
+  apiKeyEnv: z.string().min(1).optional(),
   oauth: OAuthRefSchema.optional(),
   customHeaders: StringRecordSchema.optional(),
+  protocol: ServiceProtocolSchema.optional(),
 });
 
 export type MoonshotServiceConfig = z.infer<typeof MoonshotServiceConfigSchema>;
+
+export function resolveServiceApiKey(
+  service: MoonshotServiceConfig,
+  getEnv: (name: string) => string | undefined,
+): string | undefined {
+  const apiKey = nonBlank(service.apiKey);
+  if (apiKey !== undefined) return apiKey;
+  const apiKeyEnv = nonBlank(service.apiKeyEnv);
+  if (apiKeyEnv === undefined) return undefined;
+  return nonBlank(getEnv(apiKeyEnv));
+}
+
+function nonBlank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : undefined;
+}
 
 export const ServicesConfigSchema = z
   .object({
@@ -114,11 +134,17 @@ function isolateEnvServiceCredentials(
   service: unknown,
   getEnv: (name: string) => string | undefined,
   baseUrlEnv: string,
-  apiKeyEnv: string,
+  apiKeyEnvVar: string,
 ): unknown {
   const baseUrl = nonBlankEnv(getEnv(baseUrlEnv) ?? '');
-  const apiKey = nonBlankEnv(getEnv(apiKeyEnv) ?? '');
-  if (baseUrl !== undefined) return { baseUrl, apiKey };
+  const apiKey = nonBlankEnv(getEnv(apiKeyEnvVar) ?? '');
+  if (baseUrl !== undefined) {
+    if (!isPlainObject(service)) return { baseUrl, apiKey };
+    const out: Record<string, unknown> = { baseUrl, apiKey };
+    if (service['protocol'] !== undefined) out['protocol'] = service['protocol'];
+    if (service['apiKeyEnv'] !== undefined) out['apiKeyEnv'] = service['apiKeyEnv'];
+    return out;
+  }
   if (apiKey === undefined) return service;
   if (!isPlainObject(service)) return { apiKey };
   const { apiKey: _apiKey, oauth: _oauth, ...rest } = service;

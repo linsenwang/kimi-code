@@ -5,7 +5,11 @@ import {
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IOAuthService } from '#/app/auth/auth';
-import { SERVICES_SECTION, type ServicesConfig } from '#/app/auth/configSection';
+import {
+  resolveServiceApiKey,
+  SERVICES_SECTION,
+  type ServicesConfig,
+} from '#/app/auth/configSection';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
@@ -13,6 +17,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IProviderService } from '#/llm-adapter/provider/provider';
 import { isOAuthCatalogVendor } from '#/llm-adapter/provider/provider-definition';
 
+import { DeepSeekFetchURLProvider } from './providers/deepseek-fetch-url';
 import { LocalFetchURLProvider } from './providers/local-fetch-url';
 import { MoonshotFetchURLProvider } from './providers/moonshot-fetch-url';
 import type { UrlFetcher } from './tools/fetch-url-types';
@@ -43,18 +48,21 @@ export class WebFetchService implements IWebFetchService {
       return undefined;
     }
     const tokenProvider =
-      fetchConfig.oauth === undefined
+      fetchConfig.protocol === 'deepseek' || fetchConfig.oauth === undefined
         ? undefined
         : this.oauth.resolveTokenProvider(KIMI_CODE_PROVIDER_NAME, fetchConfig.oauth);
-    return new MoonshotFetchURLProvider({
+    const options = {
       baseUrl: fetchConfig.baseUrl,
       tokenProvider,
-      apiKey: nonEmptyString(fetchConfig.apiKey),
+      apiKey: resolveServiceApiKey(fetchConfig, (name) => this.bootstrap.getEnv(name)),
       defaultHeaders: { ...this.identity.current().requestHeaders },
       customHeaders: fetchConfig.customHeaders,
       localFallback: this.localFetcher,
       telemetry: this.telemetry,
-    });
+    };
+    return fetchConfig.protocol === 'deepseek'
+      ? new DeepSeekFetchURLProvider(options)
+      : new MoonshotFetchURLProvider(options);
   }
 
   private fromManagedOAuth(): UrlFetcher | undefined {
@@ -79,11 +87,6 @@ export class WebFetchService implements IWebFetchService {
       telemetry: this.telemetry,
     });
   }
-}
-
-function nonEmptyString(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
 registerScopedService(

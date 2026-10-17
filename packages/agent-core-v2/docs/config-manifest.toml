@@ -395,20 +395,24 @@ merge_all_available_skills = true
 # [services.moonshot_search]
   # base_url: string
   # api_key: string
+  # api_key_env: string
   # oauth: object
     # storage: "file" | "keyring"
     # key: string
     # oauth_host: string
   # custom_headers: record<string, string>
+  # protocol: "moonshot" | "deepseek"
 
 # [services.moonshot_fetch]
   # base_url: string
   # api_key: string
+  # api_key_env: string
   # oauth: object
     # storage: "file" | "keyring"
     # key: string
     # oauth_host: string
   # custom_headers: record<string, string>
+  # protocol: "moonshot" | "deepseek"
 
 # ##########################################################################
 # subagent

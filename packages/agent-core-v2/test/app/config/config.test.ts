@@ -750,6 +750,33 @@ describe('services config section env bindings', () => {
     disposables.dispose();
   });
 
+  it('preserves the service protocol when env selects a different endpoint', async () => {
+    const env: Record<string, string> = {};
+    const { config, disposables } = createConfig(env);
+    await config.ready;
+    await config.set(SERVICES_SECTION, {
+      moonshotSearch: {
+        baseUrl: 'https://file.example/search',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        protocol: 'deepseek',
+        customHeaders: { 'X-Service': 'search' },
+      },
+    });
+    Object.assign(env, {
+      [WEB_SEARCH_BASE_URL_ENV]: 'https://search-env.example/search',
+      [WEB_SEARCH_API_KEY_ENV]: 'env-search-key',
+    });
+
+    expect(config.get<ServicesConfig>(SERVICES_SECTION)?.moonshotSearch).toEqual({
+      baseUrl: 'https://search-env.example/search',
+      apiKey: 'env-search-key',
+      apiKeyEnv: 'DEEPSEEK_API_KEY',
+      protocol: 'deepseek',
+    });
+
+    disposables.dispose();
+  });
+
   it('uses an env API key instead of persisted OAuth for a configured endpoint', async () => {
     const env: Record<string, string> = {};
     const { config, disposables } = createConfig(env);

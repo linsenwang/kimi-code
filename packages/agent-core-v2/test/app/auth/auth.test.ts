@@ -1200,12 +1200,14 @@ describe('WebSearchProviderService', () => {
   let ix: TestInstantiationService;
   let providers: Record<string, ProviderConfig>;
   let servicesConfig: ServicesConfig | undefined;
+  let env: Record<string, string | undefined>;
   let resolveTokenProvider: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     disposables = new DisposableStore();
     providers = {};
     servicesConfig = undefined;
+    env = {};
     resolveTokenProvider = vi
       .fn()
       .mockReturnValue({ getAccessToken: async () => 'access-token' });
@@ -1228,6 +1230,7 @@ describe('WebSearchProviderService', () => {
         );
         reg.definePartialInstance(IBootstrapService, {
           args: { requestHeaders: hostHeaders },
+          getEnv: ((name: string) => env[name]) as IBootstrapService['getEnv'],
         });
         reg.definePartialInstance(IConfigService, {
           get: ((domain: string) =>
@@ -1353,6 +1356,64 @@ describe('WebSearchProviderService', () => {
     expect(headers['X-Custom']).toBe('yes');
   });
 
+  it('builds a DeepSeek search provider from the services.moonshot_search protocol', async () => {
+    servicesConfig = {
+      moonshotSearch: {
+        baseUrl: 'https://api.deepseek.com/v1/tools/search',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        oauth: { storage: 'file', key: 'oauth/kimi-code' },
+        protocol: 'deepseek',
+      },
+    };
+    env['DEEPSEEK_API_KEY'] = 'deepseek-key';
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({
+        results: [
+          {
+            title: 'DeepSeek result',
+            url: 'https://example.com/result',
+            snippet: 'Short snippet',
+            summary: 'Long summary',
+            site_name: 'Example',
+            date: '2026-06-01T00:00:00+00:00',
+          },
+          {
+            title: 'Snippet fallback',
+            url: 'https://example.com/fallback',
+            snippet: 'Only snippet',
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = createService().getWebSearchProvider();
+    expect(provider).not.toBeUndefined();
+    expect(resolveTokenProvider).not.toHaveBeenCalled();
+    const results = await provider!.search('hello');
+
+    expect(results).toEqual([
+      {
+        title: 'DeepSeek result',
+        url: 'https://example.com/result',
+        snippet: 'Long summary',
+        siteName: 'Example',
+        date: '2026-06-01T00:00:00+00:00',
+      },
+      {
+        title: 'Snippet fallback',
+        url: 'https://example.com/fallback',
+        snippet: 'Only snippet',
+      },
+    ]);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.deepseek.com/v1/tools/search');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer deepseek-key');
+    expect(JSON.parse(init.body as string)).toEqual({ query: 'hello' });
+  });
+
   it('prefers the services.moonshot_search config over the managed oauth provider', async () => {
     servicesConfig = {
       moonshotSearch: { baseUrl: 'https://config.example.com/search', apiKey: 'config-key' },
@@ -1462,17 +1523,28 @@ describe('services config section', () => {
     expect(registry.getSection(SERVICES_SECTION)).toBeDefined();
     expect(
       registry.validate(SERVICES_SECTION, {
-        moonshotSearch: { baseUrl: 'https://api.example.com/search', apiKey: 'search-key' },
+        moonshotSearch: {
+          baseUrl: 'https://api.example.com/search',
+          apiKey: 'search-key',
+          protocol: 'deepseek',
+        },
         moonshotFetch: { baseUrl: 'https://api.example.com/fetch' },
         customService: { baseUrl: 'https://service.example.com', retries: 3 },
       }),
     ).toEqual({
-      moonshotSearch: { baseUrl: 'https://api.example.com/search', apiKey: 'search-key' },
+      moonshotSearch: {
+        baseUrl: 'https://api.example.com/search',
+        apiKey: 'search-key',
+        protocol: 'deepseek',
+      },
       moonshotFetch: { baseUrl: 'https://api.example.com/fetch' },
       customService: { baseUrl: 'https://service.example.com', retries: 3 },
     });
     expect(() =>
       registry.validate(SERVICES_SECTION, { moonshotSearch: { baseUrl: 42 } }),
+    ).toThrow();
+    expect(() =>
+      registry.validate(SERVICES_SECTION, { moonshotSearch: { protocol: 'other' } }),
     ).toThrow();
   });
 
@@ -1482,6 +1554,8 @@ describe('services config section', () => {
         moonshot_search: {
           base_url: 'https://api.example.com/search',
           api_key: 'search-key',
+          api_key_env: 'DEEPSEEK_API_KEY',
+          protocol: 'deepseek',
           custom_headers: { 'X-Search': '1' },
           oauth: { storage: 'file', key: 'oauth/kimi-code', oauth_host: 'https://auth.example.com' },
         },
@@ -1491,6 +1565,8 @@ describe('services config section', () => {
       moonshotSearch: {
         baseUrl: 'https://api.example.com/search',
         apiKey: 'search-key',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        protocol: 'deepseek',
         customHeaders: { 'X-Search': '1' },
         oauth: { storage: 'file', key: 'oauth/kimi-code', oauthHost: 'https://auth.example.com' },
       },
@@ -1505,6 +1581,8 @@ describe('services config section', () => {
           moonshotSearch: {
             baseUrl: 'https://api.example.com/search',
             apiKey: 'search-key',
+            apiKeyEnv: 'DEEPSEEK_API_KEY',
+            protocol: 'deepseek',
             customHeaders: { 'X-Search': '1' },
             oauth: {
               storage: 'file',
@@ -1519,6 +1597,8 @@ describe('services config section', () => {
       moonshot_search: {
         base_url: 'https://api.example.com/search',
         api_key: 'search-key',
+        api_key_env: 'DEEPSEEK_API_KEY',
+        protocol: 'deepseek',
         custom_headers: { 'X-Search': '1' },
         oauth: { storage: 'file', key: 'oauth/kimi-code', oauth_host: 'https://auth.example.com' },
       },
